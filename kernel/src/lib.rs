@@ -143,13 +143,13 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 // Serial print macros
 #[macro_export]
 macro_rules! kprint {
-    ($($arg:tt)*) => {
-        $crate::arch::aarch64::uart::_print(format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        $crate::arch::aarch64::uart::_print(format_args!($($arg)*))
+    }};
 }
 
 #[macro_export]
 macro_rules! kprintln {
-    () => ($crate::kprint!("\n"));
-    ($($arg:tt)*) => ($crate::kprint!("{}\n", format_args!($($arg)*)));
+    () => {{ $crate::kprint!("\n") }};
+    ($($arg:tt)*) => {{ $crate::kprint!("{}\n", format_args!($($arg)*)) }};
 }

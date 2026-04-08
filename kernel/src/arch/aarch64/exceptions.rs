@@ -1,129 +1,189 @@
 //! AArch64 Exception Vector Table
 //!
 //! ARM64 has 4 exception types × 4 source contexts = 16 vectors.
-//! Each vector entry is 128 bytes (32 instructions).
+//! Each vector entry is 128 bytes (0x80, 32 instructions max).
 //!
 //! Exception types: Synchronous, IRQ, FIQ, SError
-//! Source contexts: Current EL SP0, Current EL SPx, Lower EL AArch64, Lower EL AArch32
+//! Contexts: Current EL SP0, Current EL SPx, Lower EL AArch64, Lower EL AArch32
+//!
+//! The vector table must be 2048-byte (0x800) aligned.
+//! VBAR_EL1 points to the table base.
 
 use core::arch::global_asm;
 
-/// Install the exception vector table
-pub fn init() {
-    // Exception vector table will be set up when we have the proper .S file
-    // For now, just log that we'd install VBAR_EL1
-    // TODO: msr VBAR_EL1, <vector_table_addr>; isb
-}
-
-// Saved context for exception handlers
+/// Saved register context for exception handlers
 #[repr(C)]
 pub struct ExceptionContext {
     pub gpr: [u64; 31],   // x0-x30
-    pub elr: u64,          // Exception Link Register (return address)
+    pub elr: u64,          // Exception Link Register
     pub spsr: u64,         // Saved Program Status Register
-    pub esr: u64,          // Exception Syndrome Register
-    pub far: u64,          // Fault Address Register
 }
+
+/// Install the exception vector table into VBAR_EL1
+pub fn init() {
+    unsafe {
+        core::arch::asm!(
+            "adr {tmp}, exception_vector_table",
+            "msr VBAR_EL1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            options(nomem, nostack)
+        );
+    }
+}
+
+// ============================================================
+// Rust exception handlers (called from asm stubs)
+// ============================================================
 
 /// Read Exception Syndrome Register
 #[inline(always)]
-fn read_esr_el1() -> u64 {
-    let esr: u64;
-    unsafe { core::arch::asm!("mrs {}, ESR_EL1", out(reg) esr, options(nomem, nostack)); }
-    esr
+fn read_esr() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {0}, ESR_EL1", out(reg) v, options(nomem, nostack)); }
+    v
 }
 
 /// Read Fault Address Register
 #[inline(always)]
-fn read_far_el1() -> u64 {
-    let far: u64;
-    unsafe { core::arch::asm!("mrs {}, FAR_EL1", out(reg) far, options(nomem, nostack)); }
-    far
+fn read_far() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {0}, FAR_EL1", out(reg) v, options(nomem, nostack)); }
+    v
 }
 
-// Exception handlers (called from assembly stubs)
-
 #[no_mangle]
-extern "C" fn current_el_spx_sync(ctx: &ExceptionContext) {
-    let esr = read_esr_el1();
+extern "C" fn handle_sync_exception(ctx: &ExceptionContext) {
+    let esr = read_esr();
     let ec = (esr >> 26) & 0x3F;
-    let far = read_far_el1();
+    let far = read_far();
 
     match ec {
         0x15 => {
-            // SVC from AArch64 — syscall
-            // TODO: dispatch syscall
-            crate::kprintln!("SYSCALL #{} from kernel", ctx.gpr[8]);
+            // SVC instruction — syscall
+            crate::kprintln!("SYSCALL #{}", ctx.gpr[8]);
         }
         0x20 | 0x21 => {
-            // Instruction abort
-            crate::kprintln!("INSTRUCTION ABORT at {:#x}, FAR={:#x}", ctx.elr, far);
+            crate::kprintln!("INSTRUCTION ABORT at ELR={:#x}, FAR={:#x}", ctx.elr, far);
             loop { super::wfe(); }
         }
         0x24 | 0x25 => {
-            // Data abort
-            crate::kprintln!("DATA ABORT at {:#x}, FAR={:#x}, ESR={:#x}", ctx.elr, far, esr);
+            crate::kprintln!("DATA ABORT at ELR={:#x}, FAR={:#x}, ESR={:#x}", ctx.elr, far, esr);
             loop { super::wfe(); }
         }
         _ => {
-            crate::kprintln!("UNHANDLED SYNC EXCEPTION: EC={:#x}, ESR={:#x}, ELR={:#x}", ec, esr, ctx.elr);
+            crate::kprintln!("SYNC EXCEPTION: EC={:#x} ESR={:#x} ELR={:#x}", ec, esr, ctx.elr);
             loop { super::wfe(); }
         }
     }
 }
 
 #[no_mangle]
-extern "C" fn current_el_spx_irq(_ctx: &ExceptionContext) {
-    // Dispatch IRQ via GIC
+extern "C" fn handle_irq(_ctx: &ExceptionContext) {
     super::gic::handle_irq();
 }
 
 #[no_mangle]
-extern "C" fn current_el_spx_fiq(_ctx: &ExceptionContext) {
-    crate::kprintln!("FIQ — unexpected");
-}
-
-#[no_mangle]
-extern "C" fn current_el_spx_serror(ctx: &ExceptionContext) {
-    crate::kprintln!("SERROR at {:#x}", ctx.elr);
+extern "C" fn handle_serror(ctx: &ExceptionContext) {
+    crate::kprintln!("SERROR at ELR={:#x}", ctx.elr);
     loop { super::wfe(); }
 }
 
-#[no_mangle]
-extern "C" fn lower_el_aarch64_sync(ctx: &ExceptionContext) {
-    let esr = read_esr_el1();
-    let ec = (esr >> 26) & 0x3F;
+// ============================================================
+// Exception Vector Table (assembly)
+// ============================================================
+global_asm!(
+r"
+.section .text
 
-    match ec {
-        0x15 => {
-            // SVC from userspace — syscall dispatch
-            // syscall number in x8, args in x0-x5, return in x0
-            // TODO: userspace syscall handler
-            crate::kprintln!("USER SYSCALL #{}", ctx.gpr[8]);
-        }
-        _ => {
-            crate::kprintln!("LOWER EL SYNC: EC={:#x}, ELR={:#x}", ec, ctx.elr);
-            loop { super::wfe(); }
-        }
-    }
-}
+// Save 31 GPRs + ELR + SPSR = 33 × 8 = 264 bytes
+.macro SAVE_REGS
+    sub sp, sp, #(33 * 8)
+    stp x0,  x1,  [sp, #(16 * 0)]
+    stp x2,  x3,  [sp, #(16 * 1)]
+    stp x4,  x5,  [sp, #(16 * 2)]
+    stp x6,  x7,  [sp, #(16 * 3)]
+    stp x8,  x9,  [sp, #(16 * 4)]
+    stp x10, x11, [sp, #(16 * 5)]
+    stp x12, x13, [sp, #(16 * 6)]
+    stp x14, x15, [sp, #(16 * 7)]
+    stp x16, x17, [sp, #(16 * 8)]
+    stp x18, x19, [sp, #(16 * 9)]
+    stp x20, x21, [sp, #(16 * 10)]
+    stp x22, x23, [sp, #(16 * 11)]
+    stp x24, x25, [sp, #(16 * 12)]
+    stp x26, x27, [sp, #(16 * 13)]
+    stp x28, x29, [sp, #(16 * 14)]
+    str x30,      [sp, #(16 * 15)]
+    mrs x21, ELR_EL1
+    mrs x22, SPSR_EL1
+    stp x21, x22, [sp, #(16 * 15 + 8)]
+.endm
 
-#[no_mangle]
-extern "C" fn lower_el_aarch64_irq(_ctx: &ExceptionContext) {
-    super::gic::handle_irq();
-}
+.macro RESTORE_REGS
+    ldp x21, x22, [sp, #(16 * 15 + 8)]
+    msr ELR_EL1, x21
+    msr SPSR_EL1, x22
+    ldp x0,  x1,  [sp, #(16 * 0)]
+    ldp x2,  x3,  [sp, #(16 * 1)]
+    ldp x4,  x5,  [sp, #(16 * 2)]
+    ldp x6,  x7,  [sp, #(16 * 3)]
+    ldp x8,  x9,  [sp, #(16 * 4)]
+    ldp x10, x11, [sp, #(16 * 5)]
+    ldp x12, x13, [sp, #(16 * 6)]
+    ldp x14, x15, [sp, #(16 * 7)]
+    ldp x16, x17, [sp, #(16 * 8)]
+    ldp x18, x19, [sp, #(16 * 9)]
+    ldp x20, x21, [sp, #(16 * 10)]
+    ldp x22, x23, [sp, #(16 * 11)]
+    ldp x24, x25, [sp, #(16 * 12)]
+    ldp x26, x27, [sp, #(16 * 13)]
+    ldp x28, x29, [sp, #(16 * 14)]
+    ldr x30,      [sp, #(16 * 15)]
+    add sp, sp, #(33 * 8)
+    eret
+.endm
 
-// Exception vector table will be in a separate .S file compiled with proper target
-// For now, use a minimal Rust-only placeholder
-static VECTOR_TABLE_PLACEHOLDER: u64 = 0;
+.macro HANDLER_ENTRY handler
+    .balign 0x80
+    SAVE_REGS
+    mov x0, sp
+    bl \handler
+    RESTORE_REGS
+.endm
 
-extern "C" {
-    fn exception_vector_table();
-}
+.macro HANDLER_UNUSED
+    .balign 0x80
+    wfe
+    b -4
+.endm
 
-/// Placeholder — will be replaced with proper assembly file
-#[no_mangle]
-pub extern "C" fn exception_vector_table_stub() {
-    // Actual vector table needs to be in a .S file
-    // assembled with aarch64 assembler
-}
+// 2048-byte aligned exception vector table
+.balign 0x800
+.global exception_vector_table
+exception_vector_table:
+    // Current EL with SP0 (not used)
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+
+    // Current EL with SPx (kernel)
+    HANDLER_ENTRY handle_sync_exception
+    HANDLER_ENTRY handle_irq
+    HANDLER_UNUSED
+    HANDLER_ENTRY handle_serror
+
+    // Lower EL, AArch64 (userspace)
+    HANDLER_ENTRY handle_sync_exception
+    HANDLER_ENTRY handle_irq
+    HANDLER_UNUSED
+    HANDLER_ENTRY handle_serror
+
+    // Lower EL, AArch32 (not supported)
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+    HANDLER_UNUSED
+"
+);

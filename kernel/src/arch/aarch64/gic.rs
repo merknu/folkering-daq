@@ -13,9 +13,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-// Physical base addresses (BCM2712 hardware)
-const GICD_PHYS: u64 = 0x10_7FFF_9000;
-const GICC_PHYS: u64 = 0x10_7FFF_A000;
+// Physical base addresses (from platform config)
 
 static GICD_BASE: AtomicU64 = AtomicU64::new(0);
 static GICC_BASE: AtomicU64 = AtomicU64::new(0);
@@ -43,9 +41,10 @@ static mut IRQ_HANDLERS: [Option<fn(u32)>; MAX_IRQS] = [None; MAX_IRQS];
 
 /// Initialize GIC-400 distributor and CPU interface
 pub fn init() {
-    // Map physical addresses through HHDM
-    let gicd = crate::phys_to_virt(GICD_PHYS);
-    let gicc = crate::phys_to_virt(GICC_PHYS);
+    let gicd_phys = crate::platform::GICD_PHYS;
+    let gicc_phys = crate::platform::GICC_PHYS;
+    let gicd = crate::phys_to_virt(gicd_phys);
+    let gicc = crate::phys_to_virt(gicc_phys);
     GICD_BASE.store(gicd, Ordering::SeqCst);
     GICC_BASE.store(gicc, Ordering::SeqCst);
 
@@ -57,7 +56,7 @@ pub fn init() {
         let typer = read_gicd(GICD_TYPER);
         let num_irqs = ((typer & 0x1F) + 1) * 32;
         crate::kprintln!("  GIC-400 (GICv2): {} IRQs, GICD={:#x} GICC={:#x}",
-            num_irqs, GICD_PHYS, GICC_PHYS);
+            num_irqs, gicd_phys, gicc_phys);
 
         // Step 2: Configure all SPIs (IRQ 32+)
         for i in (32..num_irqs).step_by(4) {

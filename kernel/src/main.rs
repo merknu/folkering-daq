@@ -68,12 +68,67 @@ static mut KERNEL_STACK: [u8; 64 * 1024] = [0; 64 * 1024]; // 64 KiB
 
 // --- Entry Point ---
 
+/// Boot stub: set up stack pointer, then jump to kmain_rust.
+/// QEMU starts with SP=0, so we MUST set it up before any Rust code runs.
+#[cfg(feature = "qemu-virt")]
+core::arch::global_asm!(r"
+.section .text.boot
+.global kmain
+kmain:
+    // Enable FP/SIMD (CPACR_EL1.FPEN = 0b11)
+    mov x0, #(3 << 20)
+    msr CPACR_EL1, x0
+    isb
+
+    // Set up stack: use a dedicated region in BSS
+    adrp x0, __boot_stack_top
+    add x0, x0, :lo12:__boot_stack_top
+    mov sp, x0
+    bl kmain_rust
+1:  wfe
+    b 1b
+
+.section .bss
+.balign 16
+__boot_stack_bottom:
+    .space 65536
+__boot_stack_top:
+");
+
+/// Rust entry point (called from asm stub with valid stack).
+#[cfg(feature = "qemu-virt")]
+#[no_mangle]
+extern "C" fn kmain_rust() -> ! {
+    // QEMU identity maps memory — HHDM offset is 0
+    let hhdm_offset = 0u64;
+
+    let framebuffer = None;
+
+    // Build minimal memory map from QEMU's DTB or hardcode for -m 512M
+    static mut MEMORY_REGIONS: [MemoryRegion; 2] = [
+        MemoryRegion { base: 0x4800_0000, length: 0x1800_0000, kind: MemoryRegionKind::Usable }, // ~384 MB
+        MemoryRegion { base: 0, length: 0, kind: MemoryRegionKind::Reserved },
+    ];
+    let regions = unsafe { &MEMORY_REGIONS[..1] };
+
+    let dtb_addr = None;
+
+    let boot_info = BootInfo {
+        hhdm_offset,
+        framebuffer,
+        memory_map: regions,
+        dtb_addr,
+    };
+
+    folkering_daq_kernel::kernel_main(&boot_info)
+}
+
+/// Entry point for Limine boot (Raspberry Pi 5).
+#[cfg(feature = "pi5")]
 #[no_mangle]
 extern "C" fn kmain() -> ! {
-    // Verify Limine base revision is supported
     assert!(BASE_REVISION.is_supported());
 
-    // Extract HHDM offset
     let hhdm_offset = HHDM_REQUEST.get_response()
         .expect("HHDM response missing")
         .offset();

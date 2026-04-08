@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+pub mod platform;
 pub mod arch;
 pub mod drivers;
 pub mod usb;
@@ -91,7 +92,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     // Phase 1: Serial console (debug output)
     arch::aarch64::uart::init();
     kprintln!("=== Folkering DAQ Edition ===");
-    kprintln!("Platform: Raspberry Pi 5 (BCM2712)");
+    kprintln!("Platform: {}", platform::PLATFORM_NAME);
     kprintln!("HHDM offset: {:#x}", boot_info.hhdm_offset);
 
     // Phase 2: Exception vectors + GIC
@@ -109,34 +110,67 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     memory::init(boot_info.memory_map);
     kprintln!("[OK] Heap allocator");
 
-    // Phase 5: PCI enumeration (find RP1 south bridge)
-    drivers::pci::init();
-    kprintln!("[OK] PCIe enumeration");
+    // Phase 5+: Platform-specific hardware init
+    #[cfg(feature = "pi5")]
+    {
+        // Pi 5: RP1 south bridge → xHCI → SIRIUS → GEM Ethernet
+        drivers::pci::init();
+        kprintln!("[OK] PCIe / RP1 south bridge");
 
-    // Phase 6: xHCI USB controller
-    drivers::xhci::init();
-    kprintln!("[OK] xHCI USB host controller");
+        drivers::xhci::init();
+        kprintln!("[OK] xHCI USB controller");
 
-    // Phase 7: SIRIUS instrument
-    usb::sirius::init();
-    kprintln!("[OK] SIRIUSi-HS connected");
+        usb::sirius::init();
+        kprintln!("[OK] SIRIUSi-HS DAQ instrument");
 
-    // Phase 8: Network (RP1 Ethernet + smoltcp)
-    net::init();
-    kprintln!("[OK] Network stack (DHCP)");
+        net::init();
+        kprintln!("[OK] Cadence GEM Ethernet + smoltcp");
+    }
 
-    // Phase 9: openDAQ server
+    #[cfg(feature = "qemu-virt")]
+    {
+        // QEMU virt: no RP1, no real USB — demo/test mode
+        kprintln!("[QEMU] No RP1/xHCI/SIRIUS — test mode");
+        kprintln!("[QEMU] Networking: use -device virtio-net-pci (future)");
+        kprintln!("[QEMU] Uptime test running...");
+    }
+
+    // openDAQ server (works on both platforms once networking is up)
     daq::init();
-    kprintln!("[OK] openDAQ server on :7420");
+    kprintln!("[OK] openDAQ signal descriptors");
 
-    kprintln!("\n*** Folkering DAQ ready — streaming ***\n");
+    kprintln!("\n*** Folkering DAQ ready ***");
+    kprintln!("  Timer freq: {} Hz", arch::aarch64::counter_freq());
+    kprintln!("");
 
-    // Main loop: poll USB + network + DAQ
+    // Timer IRQs disabled for now — we use counter-based polling
+    // arch::aarch64::enable_interrupts();
+
+    // Main loop — use counter-based timing instead of IRQ ticks
+    let mut last_status = arch::aarch64::timer::millis();
     loop {
-        usb::sirius::poll();
-        net::poll();
+        #[cfg(feature = "pi5")]
+        {
+            usb::sirius::poll();
+            net::poll();
+        }
+
         daq::poll();
-        arch::aarch64::wfe(); // Wait for event (low power)
+
+        // Periodic status (every ~5 seconds)
+        let now = arch::aarch64::timer::millis();
+        if now - last_status >= 5000 {
+            last_status = now;
+            kprintln!("[{}ms] alive", now);
+
+            #[cfg(feature = "pi5")]
+            if usb::sirius::is_streaming() {
+                kprintln!("  SIRIUS: {} packets", usb::sirius::packets_received());
+            }
+        }
+
+        // Yield CPU briefly (spin a few iterations then WFE)
+        for _ in 0..1000 { core::hint::spin_loop(); }
     }
 }
 

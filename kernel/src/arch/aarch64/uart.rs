@@ -102,15 +102,7 @@ impl fmt::Write for Uart {
 /// Initialize UART0
 pub fn init() {
     let mut uart = UART.lock();
-
-    // Use Pi 5 physical address by default, QEMU virt for development
-    #[cfg(feature = "qemu-virt")]
-    let phys = UART_QEMU_VIRT;
-
-    #[cfg(not(feature = "qemu-virt"))]
-    let phys = UART0_PHYS;
-
-    let base = crate::phys_to_virt(phys);
+    let base = crate::phys_to_virt(crate::platform::UART_PHYS);
     uart.init(base);
 }
 

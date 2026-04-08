@@ -1,0 +1,28 @@
+# Folkering DAQ — Dev container with Rust + QEMU
+# Lightweight: builds kernel and runs it in one container
+
+FROM rust:1.85-bookworm
+
+RUN apt-get update && apt-get install -y \
+    qemu-system-arm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Nightly toolchain
+RUN rustup toolchain install nightly-2026-01-20 \
+    --component rust-src llvm-tools-preview \
+    --target aarch64-unknown-none
+
+WORKDIR /app
+COPY . .
+
+# Build
+RUN cd /app && cargo +nightly-2026-01-20 build --release --features qemu-virt
+
+# Run
+CMD ["qemu-system-aarch64", \
+     "-M", "virt", \
+     "-cpu", "cortex-a76", \
+     "-m", "512M", \
+     "-nographic", \
+     "-serial", "mon:stdio", \
+     "-kernel", "/app/target/aarch64-unknown-none/release/kernel"]

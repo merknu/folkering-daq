@@ -40,7 +40,9 @@ version = "0.5"
 default-features = false
 
 [features]
-default = []
+default = ["qemu-virt"]   # Default to QEMU for development
+pi5 = []                   # Raspberry Pi 5 (BCM2712 + RP1)
+qemu-virt = []             # QEMU aarch64 virt machine
 
 [profile.dev]
 panic = "abort"

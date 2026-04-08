@@ -154,4 +154,4 @@ DewesoftX compatible — locked to **protocol v3.20.6**.
 
 ## License
 
-MIT OR Apache-2.0
+Copyright (c) 2026 PQTech. All rights reserved. See [LICENSE](LICENSE).

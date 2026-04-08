@@ -223,98 +223,76 @@ unsafe fn handle_mdns(sockets: &mut SocketSet) {
     }
 }
 
-/// Handle openDAQ TCP connections on port 7420
+/// Handle openDAQ TCP connections on port 7420.
+///
+/// Protocol: daq.nd:// — raw TCP binary streaming (NOT WebSocket).
+/// DewesoftX connects directly to raw TCP, sends minimal handshake,
+/// then server pushes SignalAvailable JSON followed by binary DataPackets.
 unsafe fn handle_opendaq_tcp(sockets: &mut SocketSet) {
     let tcp_h = match TCP_HANDLE { Some(h) => h, None => return };
     let socket = sockets.get_mut::<tcp::Socket>(tcp_h);
 
     if !socket.is_active() {
-        // Re-listen if connection was closed
-        WS_UPGRADED = false;
+        if crate::daq::opendaq::is_connected() {
+            crate::daq::opendaq::on_client_disconnected();
+        }
         let _ = socket.listen(7420);
         return;
     }
 
-    if !socket.may_recv() { return; }
+    // Disable Nagle's algorithm — CRITICAL for real-time streaming
+    socket.set_nagle_enabled(false);
 
-    // Read incoming data
-    let mut recv_buf = [0u8; 4096];
-    let n = match socket.recv_slice(&mut recv_buf) {
-        Ok(n) => n,
-        Err(_) => return,
-    };
-    if n == 0 { return; }
+    // New connection: send metadata immediately
+    if socket.is_active() && !crate::daq::opendaq::is_connected() {
+        crate::daq::opendaq::on_client_connected();
 
-    let data = &recv_buf[..n];
-
-    if !WS_UPGRADED {
-        // Check for WebSocket upgrade request
-        if let Some(key) = websocket::extract_websocket_key(data) {
-            let mut response = [0u8; 256];
-            let resp_len = websocket::build_upgrade_response(key, &mut response);
-            if resp_len > 0 {
-                let _ = socket.send_slice(&response[..resp_len]);
-                WS_UPGRADED = true;
-                crate::kprintln!("  NET: WebSocket upgraded on :7420");
-
-                // Notify openDAQ about new client
-                crate::daq::opendaq::on_client_connected();
+        // Send all SignalAvailable JSON payloads over raw TCP
+        let payloads = crate::daq::opendaq::get_metadata_payloads();
+        for payload in &payloads {
+            if socket.can_send() {
+                // Prefix each JSON with 4-byte LE length (simple framing)
+                let len_bytes = (payload.len() as u32).to_le_bytes();
+                let _ = socket.send_slice(&len_bytes);
+                let _ = socket.send_slice(payload);
             }
         }
-        return;
     }
 
-    // WebSocket is upgraded — parse binary frames
-    if let Some((opcode, payload_offset, payload_len, mask_key)) =
-        websocket::parse_frame_header(data)
-    {
-        if opcode == 0x02 && payload_offset + payload_len <= n {
-            // Binary frame
-            let mut payload = [0u8; 4096];
-            let plen = payload_len.min(payload.len());
-            payload[..plen].copy_from_slice(&data[payload_offset..payload_offset + plen]);
-
-            // Unmask if client sent masked data
-            if let Some(key) = mask_key {
-                websocket::unmask_payload(key, &mut payload[..plen]);
+    // Read client data (subscription commands, keepalive)
+    if socket.may_recv() {
+        let mut recv_buf = [0u8; 2048];
+        if let Ok(n) = socket.recv_slice(&mut recv_buf) {
+            if n > 0 {
+                crate::daq::opendaq::on_client_message(&recv_buf[..n]);
             }
-
-            // Forward to openDAQ protocol handler
-            crate::daq::opendaq::on_client_message(0, &payload[..plen]);
-        } else if opcode == 0x08 {
-            // Close frame
-            WS_UPGRADED = false;
-            socket.close();
-        } else if opcode == 0x09 {
-            // Ping → respond with Pong (opcode 0x0A)
-            let mut pong = [0u8; 128];
-            pong[0] = 0x8A; // FIN + Pong
-            pong[1] = 0;    // No payload
-            let _ = socket.send_slice(&pong[..2]);
         }
     }
 }
 
-/// Send data over the WebSocket connection (for openDAQ streaming)
-pub fn ws_send(data: &[u8]) -> Result<(), &'static str> {
+/// Send raw binary data directly over TCP (no WebSocket framing).
+/// Used by openDAQ DataPacket transmission (0xDA51 sync word packets).
+///
+/// TCP_NODELAY ensures each packet is flushed immediately.
+/// If send buffer is full, returns Err — caller should drop oldest data.
+pub fn tcp_send_raw(data: &[u8]) -> Result<(), &'static str> {
     if !NET_READY.load(Ordering::Relaxed) { return Err("net not ready"); }
 
     unsafe {
-        if !WS_UPGRADED { return Err("WebSocket not connected"); }
-
         let sockets = SOCKETS.as_mut().unwrap();
         let tcp_h = TCP_HANDLE.unwrap();
         let socket = sockets.get_mut::<tcp::Socket>(tcp_h);
 
-        if !socket.can_send() { return Err("TCP send buffer full"); }
+        if !socket.can_send() { return Err("send buffer full"); }
 
-        // Wrap in WebSocket binary frame
-        let mut frame = [0u8; 32768]; // Max frame size
-        let frame_len = websocket::pack_binary_frame(data, &mut frame)
-            .map_err(|_| "frame too large")?;
-
-        socket.send_slice(&frame[..frame_len]).map_err(|_| "send error")?;
+        socket.send_slice(data).map_err(|_| "send error")?;
     }
 
     Ok(())
+}
+
+/// Legacy WebSocket send (kept for future browser-based clients)
+pub fn ws_send(data: &[u8]) -> Result<(), &'static str> {
+    // For daq.nd:// protocol, just send raw TCP
+    tcp_send_raw(data)
 }

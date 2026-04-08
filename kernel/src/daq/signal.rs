@@ -1,96 +1,39 @@
-//! Signal management — describes ADC channels as openDAQ signals
+//! Signal descriptors for openDAQ protocol
 //!
-//! Each SIRIUS channel becomes an openDAQ signal with:
-//! - Data descriptor (Int16 or Float64, sample rate, unit)
-//! - Domain descriptor (linear time, 1MHz tick resolution)
+//! Signals are STATIC — initialized once at boot, never modified.
+//! DewesoftX caches the device tree and crashes on runtime changes.
+//!
+//! valueType mapping (DewesoftX v3.20.6):
+//!   3 = Int32 (two's complement)
+//!   4 = Float32 (IEEE 754)
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use crate::usb::sirius::{SAMPLE_RATE, NUM_CHANNELS};
 
-/// Signal descriptor for openDAQ protocol
-#[derive(Clone)]
-pub struct SignalDescriptor {
-    pub id: String,             // e.g. "/device/io/ch0/value"
-    pub name: String,           // e.g. "Channel 0"
-    pub numeric_id: u32,        // Server-assigned numeric ID
-    pub sample_type: SampleType,
+/// Signal metadata (compile-time static)
+pub struct SignalInfo {
+    pub name: &'static str,
+    pub public_id: &'static str,
+    pub value_type: u8,     // 3=Int32, 4=Float32
     pub sample_rate: u32,
-    pub unit: String,
-    pub has_domain: bool,
+    pub unit: &'static str,
 }
 
-#[derive(Clone, Copy)]
-pub enum SampleType {
-    Int16,
-    Float64,
-}
-
-/// Domain signal (time axis)
-pub struct DomainDescriptor {
-    pub tick_resolution_num: u64,   // 1
-    pub tick_resolution_den: u64,   // 1_000_000 (1 MHz)
-    pub rule: DomainRule,
-}
-
-pub enum DomainRule {
-    Linear { delta: u64, start: u64 },
-}
-
-/// All signal descriptors
-static mut SIGNALS: Vec<SignalDescriptor> = Vec::new();
-static mut DOMAIN: Option<DomainDescriptor> = None;
+/// All signals (8 ADC channels + 1 time domain)
+pub static SIGNALS: [SignalInfo; NUM_CHANNELS + 1] = [
+    // Time domain (index 0) — must be declared BEFORE value signals
+    SignalInfo { name: "Time", public_id: "sig_time", value_type: 3, sample_rate: SAMPLE_RATE, unit: "ticks" },
+    // ADC channels (indices 1-8)
+    SignalInfo { name: "Channel_0", public_id: "sig_ch0", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_1", public_id: "sig_ch1", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_2", public_id: "sig_ch2", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_3", public_id: "sig_ch3", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_4", public_id: "sig_ch4", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_5", public_id: "sig_ch5", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_6", public_id: "sig_ch6", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+    SignalInfo { name: "Channel_7", public_id: "sig_ch7", value_type: 3, sample_rate: SAMPLE_RATE, unit: "V" },
+];
 
 pub fn init_signals() {
-    // Create 8 ADC channel signals
-    let mut signals = Vec::with_capacity(9);
-
-    for ch in 0..8 {
-        signals.push(SignalDescriptor {
-            id: alloc::format!("/device/io/ch{}/value", ch),
-            name: alloc::format!("Channel {}", ch),
-            numeric_id: (ch + 1) as u32,
-            sample_type: SampleType::Int16,
-            sample_rate: crate::usb::sirius::SAMPLE_RATE,
-            unit: String::from("V"),
-            has_domain: true,
-        });
-    }
-
-    // Domain signal (shared time axis)
-    let domain = DomainDescriptor {
-        tick_resolution_num: 1,
-        tick_resolution_den: 1_000_000, // 1 MHz
-        rule: DomainRule::Linear {
-            delta: 50, // 1_000_000 / 20_000 = 50 ticks per sample
-            start: 0,
-        },
-    };
-
-    unsafe {
-        SIGNALS = signals;
-        DOMAIN = Some(domain);
-    }
-}
-
-pub fn get_signals() -> &'static [SignalDescriptor] {
-    unsafe { &SIGNALS }
-}
-
-pub fn get_domain() -> Option<&'static DomainDescriptor> {
-    unsafe { DOMAIN.as_ref() }
-}
-
-/// Serialize signal descriptor to openDAQ JSON format
-/// Used in SignalAvailable messages
-pub fn serialize_signal_json(signal: &SignalDescriptor) -> String {
-    // openDAQ serialization format uses "__type" markers
-    alloc::format!(
-        r#"{{"__type":"Signal","globalId":"{}","name":"{}","dataDescriptor":{{"__type":"DataDescriptor","sampleType":"{}","rule":{{"__type":"ExplicitRule"}},"dimensions":[]}},"domainSignalId":"/device/io/time"}}"#,
-        signal.id,
-        signal.name,
-        match signal.sample_type {
-            SampleType::Int16 => "Int16",
-            SampleType::Float64 => "Float64",
-        }
-    )
+    // Signals are compile-time static — nothing to initialize
+    // Kept for API compatibility with boot sequence
 }

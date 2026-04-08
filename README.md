@@ -1,152 +1,156 @@
 # Folkering DAQ Edition
 
-Bare-metal aarch64 operating system for data acquisition on Raspberry Pi 5.  
+Bare-metal aarch64 operating system for Raspberry Pi 5.  
 Drives a **Dewesoft SIRIUSi-HS** instrument via USB and streams data over **openDAQ Native Streaming** to DewesoftX.
 
 > A specialized distro of [Folkering OS](https://github.com/merknu/folkering-os), purpose-built for industrial DAQ.
 
-## Architecture
+## What It Does
+
+A Raspberry Pi 5 running Folkering DAQ replaces the need for a full Windows PC with DewesoftX drivers. Plug the SIRIUSi-HS into the Pi's USB port, connect Ethernet, and DewesoftX on any PC on the network auto-discovers it.
 
 ```
-Raspberry Pi 5 (BCM2712)
-├── Folkering DAQ kernel (bare-metal, 45 KB)
-│   ├── xHCI USB ──► SIRIUSi-HS (8ch × 20kHz × int16)
-│   ├── Cadence GEM Ethernet ──► smoltcp TCP/IP
-│   ├── openDAQ server (daq.nd://:7420)
-│   └── mDNS discovery (_opendaq-nd._tcp.local)
-│
-├── USB ──► Dewesoft SIRIUSi-HS
-└── Ethernet ──► DewesoftX (auto-discovers via mDNS)
+┌──────────────┐   USB   ┌─────────────────────────────────┐  Ethernet  ┌────────────┐
+│ SIRIUSi-HS   │────────►│ Raspberry Pi 5                  │───────────►│ DewesoftX  │
+│ 8ch, 20kHz   │         │ Folkering DAQ (bare-metal)      │   mDNS     │ (any PC)   │
+│ VID:1CED     │         │ Boot: ~2 sec, RAM: ~20 MB       │   :7420    │            │
+└──────────────┘         └─────────────────────────────────┘            └────────────┘
 ```
 
-## Quick Start
+## Deploy to Raspberry Pi 5
 
-### Run in QEMU (development)
+### 1. Build the kernel
 
 ```bash
-# Prerequisites: Rust nightly + QEMU
-rustup toolchain install nightly-2026-01-20 --component rust-src llvm-tools-preview --target aarch64-unknown-none
+# Install Rust nightly with aarch64 target
+rustup toolchain install nightly-2026-01-20 \
+    --component rust-src llvm-tools-preview \
+    --target aarch64-unknown-none
 
-# Build and run
+# Build for Pi 5
+cargo build --release --features pi5 --no-default-features
+```
+
+### 2. Prepare the SD card
+
+Format a microSD card with a FAT32 boot partition, then copy:
+
+```
+SD Card (FAT32)
+├── config.txt          # Pi firmware config
+├── kernel8.img         # ← Our kernel (renamed from ELF)
+├── bcm2712-rpi-5-b.dtb # Device tree (from Pi firmware)
+├── fixup4.dat          # Pi firmware files
+└── start4.elf          # Pi firmware files
+```
+
+Firmware files from [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot).
+
+**config.txt:**
+```ini
+arm_64bit=1
+kernel=kernel8.img
+enable_uart=1
+uart_2ndstage=1
+dtoverlay=disable-bt
+```
+
+### 3. Connect and boot
+
+1. Insert SD card into Pi 5
+2. Connect SIRIUSi-HS to USB 3.0 port
+3. Connect Ethernet cable to your LAN
+4. Power on — boot takes ~2 seconds
+5. Open DewesoftX → device appears automatically via mDNS
+
+### Serial debug console
+
+Connect a USB-to-serial adapter to the Pi 5 debug header (between HDMI ports):
+```
+Pin 1: GND
+Pin 2: TX (from Pi)  → connect to RX on adapter
+Pin 3: RX (to Pi)    → connect to TX on adapter
+
+Baud: 115200, 8N1
+```
+
+## Development (QEMU)
+
+For testing without Pi hardware:
+
+```bash
+# Build (QEMU is the default target)
 cargo build --release
+
+# Run
 qemu-system-aarch64 -M virt -cpu cortex-a76 -m 512M -nographic \
     -kernel target/aarch64-unknown-none/release/kernel
 ```
 
-Expected output:
 ```
 === Folkering DAQ Edition ===
 Platform: QEMU virt (aarch64)
-[OK] Exception vectors installed
 [OK] GIC-400 (GICv2) interrupt controller
 [OK] ARM Generic Timer
 [OK] Heap allocator
   openDAQ: 9 streams initialized (v3.20.6 compat)
-  openDAQ: Native Streaming on :7420 (daq.nd://)
 *** Folkering DAQ ready ***
 [5009ms] alive
-[10009ms] alive
 ```
 
-Press `Ctrl-A X` to exit QEMU.
-
-### Run in Docker
-
-```bash
-docker compose up
-```
-
-### Deploy to Proxmox
-
-```bash
-./tools/deploy-proxmox.sh <proxmox-host>
-```
-
-### Build for Raspberry Pi 5
-
-```bash
-cargo build --release --features pi5 --no-default-features
-# Output: target/aarch64-unknown-none/release/kernel
-```
-
-## Build Targets
-
-| Feature | Platform | Use |
-|---|---|---|
-| `qemu-virt` (default) | QEMU aarch64 virt | Development & testing |
-| `pi5` | Raspberry Pi 5 | Production with real hardware |
+`Ctrl-A X` to exit.
 
 ## Project Structure
 
 ```
 kernel/src/
-├── main.rs                 # Limine (Pi5) / direct boot (QEMU) entry
-├── lib.rs                  # Boot sequence + main loop
-├── platform.rs             # Per-platform constants (UART, GIC, PCIe)
+├── platform.rs             # Pi 5 vs QEMU constants
 ├── arch/aarch64/
-│   ├── exceptions.rs       # Exception vector table (global_asm!)
-│   ├── gic.rs              # GIC-400 (GICv2) interrupt controller
+│   ├── exceptions.rs       # Exception vector table
+│   ├── gic.rs              # GIC-400 interrupt controller
 │   ├── timer.rs            # ARM Generic Timer
-│   └── uart.rs             # PL011 UART serial console
+│   └── uart.rs             # PL011 UART (debug console)
 ├── drivers/
-│   ├── pci.rs              # PCIe ECAM + RP1 south bridge discovery
-│   ├── xhci.rs             # xHCI USB 3.0 (ring-based DMA, sync completion)
-│   └── gem.rs              # Cadence GEM Gigabit Ethernet MAC (64-bit DMA)
+│   ├── pci.rs              # PCIe → RP1 south bridge discovery
+│   ├── xhci.rs             # USB 3.0 host controller
+│   └── gem.rs              # Cadence GEM Gigabit Ethernet
 ├── usb/
-│   └── sirius.rs           # SIRIUSi-HS reverse-engineered USB protocol
+│   └── sirius.rs           # SIRIUSi-HS protocol (reverse-engineered)
 ├── net/
-│   ├── mod.rs              # smoltcp integration (phy::Device for GEM)
-│   ├── mdns.rs             # mDNS/DNS-SD responder
-│   └── websocket.rs        # RFC 6455 (SHA-1, Base64, framing)
+│   ├── mod.rs              # smoltcp TCP/IP stack
+│   ├── mdns.rs             # mDNS service discovery
+│   └── websocket.rs        # RFC 6455 (for browser clients)
 └── daq/
-    ├── opendaq.rs           # Native Streaming server (0xDA51 binary packets)
-    └── signal.rs            # Signal descriptors (8ch + time domain)
+    ├── opendaq.rs           # Native Streaming binary protocol
+    └── signal.rs            # 8 ADC channels + time domain
 ```
 
-## Hardware Addresses (BCM2712 / RP1)
+## BCM2712 / RP1 Hardware Map
 
-| Component | Physical Address |
-|---|---|
-| UART0 (PL011) | `0x10_7D00_1000` |
-| GIC-400 GICD | `0x10_7FFF_9000` |
-| GIC-400 GICC | `0x10_7FFF_A000` |
-| PCIe ECAM | `0x10_0012_0000` |
-| RP1 BAR1 | `0x1F_0000_0000` |
-| RP1 Ethernet (GEM) | BAR1 + `0x10_0000` |
-| RP1 xHCI 0 | BAR1 + `0x20_0000` |
-| RP1 xHCI 1 | BAR1 + `0x30_0000` |
+| Component | Address | Notes |
+|---|---|---|
+| UART0 (debug) | `0x10_7D00_1000` | On SoC, works without RP1 |
+| GIC-400 | `0x10_7FFF_9000` | GICv2, MMIO-based |
+| PCIe ECAM | `0x10_0012_0000` | RP1 is VID:0x1DE4 PID:0x0001 |
+| RP1 Ethernet | BAR1 + `0x10_0000` | Cadence GEM, RGMII to BCM54213PE |
+| RP1 xHCI 0 | BAR1 + `0x20_0000` | USB 3.0 ports |
 
-## openDAQ Protocol (DewesoftX Compatible)
+## openDAQ Protocol
 
-The server implements **openDAQ Native Streaming v3.20.6** over raw TCP on port 7420.
+DewesoftX compatible — locked to **protocol v3.20.6**.
 
-> **Warning:** DewesoftX rejects protocol versions above 3.20.6 silently.
+**mDNS:** `_opendaq-nd._tcp.local`, TXT: `caps=OPENDAQ`, `version=3.20.6`
 
-**mDNS discovery:**
-- Service: `_opendaq-nd._tcp.local`
-- TXT: `caps=OPENDAQ`, `version=3.20.6`, `model=PQTech`
-
-**Binary DataPacket (12-byte header, Little-Endian):**
+**Binary packets (port 7420, raw TCP):**
 ```
-Offset  Field          Type    Description
-0x00    Sync Word      u16     0xDA51
-0x02    Packet Type    u8      0x01 = DataPacket
-0x03    Flags          u8      0x00 = raw uncompressed
-0x04    Stream ID      u32     djb2 hash of publicId
-0x08    Payload Size   u32     byte count of sample data
-0x0C    Payload        [u8]    raw int16 LE samples
+[0xDA51 sync][type:u8][flags:u8][stream_id:u32 LE][size:u32 LE][samples...]
 ```
 
-## SIRIUS USB Protocol
+## Based On
 
-Reverse-engineered from Wireshark USB captures ([PQTech-openDAQ](https://github.com/sverrekm/PQTech-openDAQ)).
-
-- **VID:** `0x1CED` (Dewesoft), **PID:** `0x1002`
-- **EP1 OUT/IN:** AD/B1 command protocol (15-byte commands, 1-byte poll)
-- **EP2 IN:** ADC data — 15872 bytes (992 frames × 8 channels × int16 LE)
-- **EP4 IN:** Status (20 bytes) — must drain to prevent FIFO stall
-- **EP6 IN:** Sync (15872 bytes) — must read in lockstep with EP2
-- **Heartbeat:** B1 at ~150/sec (device disconnects without it)
+- [PQTech-openDAQ](https://github.com/sverrekm/PQTech-openDAQ) — reverse-engineered SIRIUS USB protocol
+- [openDAQ SDK](https://github.com/openDAQ/openDAQ) — protocol reference
+- [Folkering OS](https://github.com/merknu/folkering-os) — kernel architecture
 
 ## License
 

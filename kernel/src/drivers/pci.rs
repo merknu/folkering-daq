@@ -1,115 +1,126 @@
-//! PCIe enumeration for Raspberry Pi 5
+//! PCIe enumeration for BCM2712
 //!
-//! BCM2712 has a PCIe 2.0 x4 root complex connecting to the RP1 south bridge.
-//! RP1 contains: xHCI USB, Ethernet MAC, GPIO, SPI, I2C, UART, etc.
+//! BCM2712 has a PCIe Gen 2.0 x4 root complex connecting to the RP1 south bridge.
+//! RP1 is a SINGLE-FUNCTION PCIe endpoint — all internal devices (xHCI, Ethernet)
+//! are behind BAR1 at fixed AXI offsets, NOT as separate PCIe functions.
 //!
-//! PCIe ECAM (Enhanced Configuration Access Mechanism) base from DTB.
-//! Default on Pi 5: 0x1_0000_0000 (4 GiB mark)
+//! PCIe ECAM base: 0x10_0012_0000 (BCM2712)
+//! RP1 identification: Vendor ID 0x1DE4 ("Raspberry Pi Ltd"), Device ID 0x0001
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// PCIe ECAM physical base (BCM2712)
+const ECAM_PHYS: u64 = 0x10_0012_0000;
+
+/// RP1 South Bridge identity
+pub const RP1_VENDOR_ID: u16 = 0x1DE4; // Raspberry Pi Ltd
+pub const RP1_DEVICE_ID: u16 = 0x0001; // RP1 PCIe 2.0 South Bridge
+
+/// RP1 BAR1 base (firmware-initialized, mapped in AArch64 physical space)
+pub const RP1_BAR1_PHYS: u64 = 0x1F_0000_0000;
+
+/// RP1 internal AXI offsets from BAR1
+pub const RP1_ETH_OFFSET: u64 = 0x10_0000;   // Cadence GEM Ethernet MAC
+pub const RP1_XHCI0_OFFSET: u64 = 0x20_0000; // xHCI USB Controller 0
+pub const RP1_XHCI1_OFFSET: u64 = 0x30_0000; // xHCI USB Controller 1
+
 static ECAM_BASE: AtomicU64 = AtomicU64::new(0);
 
-/// PCI device info
-#[derive(Debug, Clone)]
-pub struct PciDevice {
+/// RP1 discovery result
+pub struct Rp1Info {
     pub bus: u8,
     pub device: u8,
     pub function: u8,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub class_code: u8,
-    pub subclass: u8,
-    pub prog_if: u8,
-    pub bars: [u64; 6],
-    pub irq_line: u8,
+    pub bar1_phys: u64,
+    /// Virtual addresses for RP1 sub-devices (via HHDM)
+    pub eth_base: u64,
+    pub xhci0_base: u64,
+    pub xhci1_base: u64,
 }
 
-/// All discovered PCI devices
-static mut DEVICES: Vec<PciDevice> = Vec::new();
+static mut RP1: Option<Rp1Info> = None;
 
-/// ECAM config space address for a BDF
+/// ECAM config space address for Bus:Device:Function + register offset
 fn ecam_addr(bus: u8, dev: u8, func: u8, offset: u16) -> u64 {
     let base = ECAM_BASE.load(Ordering::Relaxed);
     base + ((bus as u64) << 20)
-        | ((dev as u64) << 15)
-        | ((func as u64) << 12)
-        | (offset as u64 & 0xFFF)
+         | ((dev as u64) << 15)
+         | ((func as u64) << 12)
+         | (offset as u64 & 0xFFF)
 }
 
 fn read_config32(bus: u8, dev: u8, func: u8, offset: u16) -> u32 {
     let addr = ecam_addr(bus, dev, func, offset);
-    unsafe { crate::arch::aarch64::mmio_read32(addr) }
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
 
 fn write_config32(bus: u8, dev: u8, func: u8, offset: u16, val: u32) {
     let addr = ecam_addr(bus, dev, func, offset);
-    unsafe { crate::arch::aarch64::mmio_write32(addr, val) }
+    unsafe { core::ptr::write_volatile(addr as *mut u32, val); }
 }
 
 pub fn init() {
-    // Set ECAM base — will come from DTB eventually
-    #[cfg(not(feature = "pi5"))]
-    let ecam_phys = 0x3f00_0000_u64; // QEMU virt PCIe ECAM
+    ECAM_BASE.store(crate::phys_to_virt(ECAM_PHYS), Ordering::SeqCst);
+    crate::kprintln!("  PCIe ECAM at phys {:#x}", ECAM_PHYS);
 
-    #[cfg(feature = "pi5")]
-    let ecam_phys = 0x1_0000_0000_u64; // BCM2712 PCIe ECAM
+    // Scan bus 0 for RP1
+    for bus in 0..2u8 {
+        for dev in 0..32u8 {
+            let id = read_config32(bus, dev, 0, 0x00);
+            let vendor_id = (id & 0xFFFF) as u16;
+            if vendor_id == 0xFFFF || vendor_id == 0x0000 { continue; }
 
-    ECAM_BASE.store(crate::phys_to_virt(ecam_phys), Ordering::SeqCst);
+            let device_id = (id >> 16) as u16;
+            let class_reg = read_config32(bus, dev, 0, 0x08);
+            let class_code = (class_reg >> 24) as u8;
+            let subclass = (class_reg >> 16) as u8;
 
-    crate::kprintln!("  PCIe ECAM at phys {:#x}", ecam_phys);
+            crate::kprintln!("  PCI {:02x}:{:02x}.0 [{:04x}:{:04x}] class {:02x}:{:02x}",
+                bus, dev, vendor_id, device_id, class_code, subclass);
 
-    // Scan bus 0
-    for dev in 0..32u8 {
-        let id = read_config32(0, dev, 0, 0x00);
-        let vendor_id = (id & 0xFFFF) as u16;
-        if vendor_id == 0xFFFF { continue; }
+            // Check if this is RP1
+            if vendor_id == RP1_VENDOR_ID && device_id == RP1_DEVICE_ID {
+                crate::kprintln!("  >>> RP1 South Bridge found!");
 
-        let device_id = (id >> 16) as u16;
-        let class_reg = read_config32(0, dev, 0, 0x08);
-        let class_code = (class_reg >> 24) as u8;
-        let subclass = (class_reg >> 16) as u8;
-        let prog_if = (class_reg >> 8) as u8;
-        let irq = (read_config32(0, dev, 0, 0x3C) & 0xFF) as u8;
+                // Read BAR1 (64-bit)
+                let bar1_lo = read_config32(bus, dev, 0, 0x14); // BAR1 at offset 0x14
+                let bar1_hi = read_config32(bus, dev, 0, 0x18); // BAR1 upper 32 bits
+                let bar1_phys = ((bar1_hi as u64) << 32) | ((bar1_lo & !0xF) as u64);
 
-        // Read BARs
-        let mut bars = [0u64; 6];
-        for i in 0..6 {
-            let bar_offset = 0x10 + (i as u16) * 4;
-            let bar = read_config32(0, dev, 0, bar_offset);
-            bars[i] = bar as u64;
+                // Use firmware-assigned BAR1 or default
+                let bar1 = if bar1_phys != 0 { bar1_phys } else { RP1_BAR1_PHYS };
 
-            // 64-bit BAR: combine with next
-            if bar & 0x4 != 0 && i < 5 {
-                let bar_hi = read_config32(0, dev, 0, bar_offset + 4);
-                bars[i] |= (bar_hi as u64) << 32;
+                crate::kprintln!("  RP1 BAR1 = {:#x}", bar1);
+
+                // Map RP1 sub-devices via HHDM
+                let rp1 = Rp1Info {
+                    bus, device: dev, function: 0,
+                    bar1_phys: bar1,
+                    eth_base: crate::phys_to_virt(bar1 + RP1_ETH_OFFSET),
+                    xhci0_base: crate::phys_to_virt(bar1 + RP1_XHCI0_OFFSET),
+                    xhci1_base: crate::phys_to_virt(bar1 + RP1_XHCI1_OFFSET),
+                };
+
+                crate::kprintln!("  RP1 Ethernet MAC: phys {:#x}", bar1 + RP1_ETH_OFFSET);
+                crate::kprintln!("  RP1 xHCI 0:       phys {:#x}", bar1 + RP1_XHCI0_OFFSET);
+                crate::kprintln!("  RP1 xHCI 1:       phys {:#x}", bar1 + RP1_XHCI1_OFFSET);
+
+                unsafe { RP1 = Some(rp1); }
+
+                // Enable bus mastering and memory space for RP1
+                let cmd = read_config32(bus, dev, 0, 0x04);
+                write_config32(bus, dev, 0, 0x04, cmd | 0x06); // Memory Space + Bus Master
+
+                return;
             }
         }
-
-        let device = PciDevice {
-            bus: 0, device: dev, function: 0,
-            vendor_id, device_id, class_code, subclass, prog_if,
-            bars, irq_line: irq,
-        };
-
-        crate::kprintln!("  PCI {:02x}:{:02x}.0 [{:04x}:{:04x}] class {:02x}:{:02x}",
-            0, dev, vendor_id, device_id, class_code, subclass);
-
-        unsafe { DEVICES.push(device); }
     }
+
+    crate::kprintln!("  WARNING: RP1 not found on PCIe bus!");
 }
 
-/// Find a PCI device by class/subclass
-pub fn find_by_class(class: u8, subclass: u8) -> Option<&'static PciDevice> {
-    unsafe {
-        DEVICES.iter().find(|d| d.class_code == class && d.subclass == subclass)
-    }
-}
-
-/// Find a PCI device by vendor/device ID
-pub fn find_by_id(vendor: u16, device: u16) -> Option<&'static PciDevice> {
-    unsafe {
-        DEVICES.iter().find(|d| d.vendor_id == vendor && d.device_id == device)
-    }
+/// Get RP1 info (None if not found)
+pub fn rp1() -> Option<&'static Rp1Info> {
+    unsafe { RP1.as_ref() }
 }

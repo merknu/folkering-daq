@@ -1,7 +1,0 @@
-cargo:rustc-link-arg=-TC:/Users/merkn/folkering/folkering-daq/kernel/linker.ld
-cargo:rustc-link-arg=-z
-cargo:rustc-link-arg=common-page-size=0x1000
-cargo:rustc-link-arg=-z
-cargo:rustc-link-arg=max-page-size=0x1000
-cargo:rustc-link-arg=-no-pie
-cargo:rerun-if-changed=linker.ld

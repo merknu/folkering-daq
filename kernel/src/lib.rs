@@ -99,7 +99,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     kprintln!("[OK] Exception vectors installed");
 
     arch::aarch64::gic::init();
-    kprintln!("[OK] GICv3 interrupt controller");
+    kprintln!("[OK] GIC-400 (GICv2) interrupt controller");
 
     // Phase 3: Timer
     arch::aarch64::timer::init();

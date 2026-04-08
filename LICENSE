@@ -9,8 +9,13 @@ This project contains work from multiple copyright holders:
     DAQ application layer (based on https://github.com/sverrekm/PQTech-openDAQ):
     Copyright (c) 2026 sverrekm (https://github.com/sverrekm)
 
-This software is proprietary and confidential. No part of this software
-may be reproduced, distributed, or transmitted in any form or by any means,
-without the prior written permission of the respective copyright holders.
+This project also references the openDAQ SDK (https://github.com/openDAQ/openDAQ),
+which is open source under the Apache License 2.0 and free for all to use.
+The openDAQ protocol specifications used in this project are derived from
+that public SDK.
+
+The proprietary portions of this software may not be reproduced, distributed,
+or transmitted in any form or by any means, without the prior written
+permission of the respective copyright holders.
 
 For licensing inquiries, contact the repository owners.

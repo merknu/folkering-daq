@@ -5,7 +5,8 @@ This project contains work from multiple copyright holders:
   - Folkering OS kernel architecture, drivers, and boot system:
     Copyright (c) 2026 merknu (https://github.com/merknu)
 
-  - openDAQ integration, SIRIUS USB protocol, and DAQ application layer:
+  - PQTech-openDAQ: openDAQ integration, SIRIUS USB protocol, and
+    DAQ application layer (based on https://github.com/sverrekm/PQTech-openDAQ):
     Copyright (c) 2026 sverrekm (https://github.com/sverrekm)
 
 This software is proprietary and confidential. No part of this software

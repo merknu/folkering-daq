@@ -151,9 +151,8 @@ pub fn init() {
 }
 
 pub fn poll() {
-    // TODO: accept TCP connections on port 7420
-    // TODO: handle WebSocket HTTP Upgrade handshake (101 Switching Protocols)
-    // TODO: process incoming binary frames
+    // TCP/WebSocket handling is done by net::poll() → handle_opendaq_tcp()
+    // This function handles higher-level openDAQ state if needed
 }
 
 /// Broadcast ADC data to all subscribed clients
@@ -172,9 +171,11 @@ pub fn broadcast_data(data: &[[i16; FRAMES_PER_PACKET]; NUM_CHANNELS]) {
                 let packet = build_data_packet(sig_id, &data[ch], pid);
                 let header = TransportHeader::new(PT_SIGNAL_PACKET, packet.len() as u32);
 
-                // TODO: send header.to_le_bytes() + packet over WebSocket binary frame
-                let _ = header;
-                let _ = packet;
+                // Pack transport header + packet and send via WebSocket
+                let mut wire = alloc::vec![0u8; 4 + packet.len()];
+                wire[..4].copy_from_slice(&header.to_le_bytes());
+                wire[4..].copy_from_slice(&packet);
+                let _ = crate::net::ws_send(&wire);
             }
         }
     }

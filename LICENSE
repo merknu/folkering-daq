@@ -1,7 +1,15 @@
-Copyright (c) 2026 PQTech / Sverrekm. All rights reserved.
+Copyright (c) 2026 folkering-daq contributors. All rights reserved.
+
+This project contains work from multiple copyright holders:
+
+  - Folkering OS kernel architecture, drivers, and boot system:
+    Copyright (c) 2026 merknu (https://github.com/merknu)
+
+  - openDAQ integration, SIRIUS USB protocol, and DAQ application layer:
+    Copyright (c) 2026 sverrekm (https://github.com/sverrekm)
 
 This software is proprietary and confidential. No part of this software
 may be reproduced, distributed, or transmitted in any form or by any means,
-without the prior written permission of the copyright holder.
+without the prior written permission of the respective copyright holders.
 
-For licensing inquiries, contact the repository owner.
+For licensing inquiries, contact the repository owners.

@@ -1,0 +1,4 @@
+[toolchain]
+channel = "nightly-2026-01-20"
+components = ["rust-src", "llvm-tools-preview"]
+targets = ["aarch64-unknown-none", "wasm32-unknown-unknown"]

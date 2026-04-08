@@ -1,0 +1,11 @@
+C:\Users\merkn\folkering\folkering-daq\target\aarch64-folkering-daq\release\deps\managed-4f8c1d226961954f.d: C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\lib.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\object.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slice.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slotmap.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\map.rs
+
+C:\Users\merkn\folkering\folkering-daq\target\aarch64-folkering-daq\release\deps\libmanaged-4f8c1d226961954f.rlib: C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\lib.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\object.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slice.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slotmap.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\map.rs
+
+C:\Users\merkn\folkering\folkering-daq\target\aarch64-folkering-daq\release\deps\libmanaged-4f8c1d226961954f.rmeta: C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\lib.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\object.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slice.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slotmap.rs C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\map.rs
+
+C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\lib.rs:
+C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\object.rs:
+C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slice.rs:
+C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\slotmap.rs:
+C:\Users\merkn\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\managed-0.8.0\src\map.rs:

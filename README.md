@@ -151,7 +151,3 @@ DewesoftX compatible — locked to **protocol v3.20.6**.
 - [PQTech-openDAQ](https://github.com/sverrekm/PQTech-openDAQ) — reverse-engineered SIRIUS USB protocol
 - [openDAQ SDK](https://github.com/openDAQ/openDAQ) — protocol reference
 - [Folkering OS](https://github.com/merknu/folkering-os) — kernel architecture
-
-## License
-
-Copyright (c) 2026 PQTech. All rights reserved. See [LICENSE](LICENSE).

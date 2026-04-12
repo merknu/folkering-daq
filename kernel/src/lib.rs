@@ -26,6 +26,7 @@ pub mod daq;
 pub mod memory;
 pub mod task;
 pub mod wasm;
+#[cfg(feature = "silverfir-jit")]
 pub mod silverfir;
 pub mod panic;
 
@@ -141,37 +142,34 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     daq::init();
     kprintln!("[OK] openDAQ signal descriptors + ring buffers");
 
-    // Phase 6: Silverfir-nano WASM runtime
-    kprintln!("[OK] Silverfir-nano JIT runtime ready");
-    kprintln!("     Host functions: {} registered", wasm::host_functions::HOST_FUNCTIONS.len());
+    // Phase 6: WASM runtime (wasmi interpreter)
+    kprintln!("[OK] wasmi WASM runtime ready");
+    kprintln!("     Host functions: 7 DAQ functions registered via Linker");
 
     // Load embedded default DSP app (lowpass filter compiled into the kernel)
-    // This ensures the DAQ node starts processing immediately at boot.
-    // Can be replaced at runtime via network hot-swap on port 7421.
-    static mut SILVERFIR_INSTANCE: Option<silverfir::runtime::SilverfirInstance> = None;
+    static mut WASM_APP: Option<wasm::runtime::DaqWasmApp> = None;
 
     #[cfg(feature = "embedded-dsp")]
     {
         static EMBEDDED_WASM: &[u8] = include_bytes!("../../wasm-apps/lowpass_filter.wasm");
-        kprintln!("  Silverfir: loading embedded DSP app ({} bytes)...", EMBEDDED_WASM.len());
+        kprintln!("  WASM: loading embedded DSP app ({} bytes)...", EMBEDDED_WASM.len());
 
-        match silverfir::SilverfirModule::load(EMBEDDED_WASM) {
-            Ok(module) => {
-                let mut instance = silverfir::runtime::SilverfirInstance::new(module);
-                match instance.init() {
-                    Ok(()) => {
-                        kprintln!("  Silverfir: embedded lowpass filter loaded OK");
-                        unsafe { SILVERFIR_INSTANCE = Some(instance); }
+        match wasm::runtime::DaqWasmApp::new(EMBEDDED_WASM) {
+            Ok(mut app) => {
+                match app.call_init() {
+                    wasm::runtime::DaqWasmResult::Ok => {
+                        kprintln!("  WASM: embedded lowpass filter loaded OK");
+                        unsafe { WASM_APP = Some(app); }
                     }
-                    Err(e) => kprintln!("  Silverfir: embedded init failed: {:?}", e),
+                    _ => kprintln!("  WASM: embedded init failed"),
                 }
             }
-            Err(e) => kprintln!("  Silverfir: embedded load failed: {:?}", e),
+            Err(e) => kprintln!("  WASM: embedded load failed: {}", e),
         }
     }
 
     #[cfg(not(feature = "embedded-dsp"))]
-    kprintln!("  Silverfir: no embedded app (upload via TCP :7421)");
+    kprintln!("  WASM: no embedded app (upload via TCP :7421)");
 
     kprintln!("\n*** Folkering DAQ ready ***");
     kprintln!("  Timer freq: {} Hz", arch::aarch64::counter_freq());
@@ -194,34 +192,43 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
         daq::poll();
 
-        // Check for hot-swap: compile and load new WASM module from network
+        // Check for hot-swap: load new WASM module from network
         if let Some(wasm_bytes) = net::hotswap::take_pending_wasm() {
-            kprintln!("  HOTSWAP: compiling {} bytes...", wasm_bytes.len());
-            match silverfir::SilverfirModule::load(&wasm_bytes) {
-                Ok(module) => {
-                    let mut instance = silverfir::runtime::SilverfirInstance::new(module);
-                    if let Err(e) = instance.init() {
-                        kprintln!("  HOTSWAP: init failed: {:?}", e);
-                        net::hotswap::send_response(false, "init failed");
-                    } else {
-                        kprintln!("  HOTSWAP: module loaded and initialized");
-                        unsafe { SILVERFIR_INSTANCE = Some(instance); }
-                        net::hotswap::send_response(true, "module loaded");
+            kprintln!("  HOTSWAP: loading {} bytes...", wasm_bytes.len());
+            match wasm::runtime::DaqWasmApp::new(&wasm_bytes) {
+                Ok(mut app) => {
+                    match app.call_init() {
+                        wasm::runtime::DaqWasmResult::Ok => {
+                            kprintln!("  HOTSWAP: module loaded and initialized");
+                            unsafe { WASM_APP = Some(app); }
+                            net::hotswap::send_response(true, "module loaded");
+                        }
+                        _ => {
+                            kprintln!("  HOTSWAP: init failed");
+                            net::hotswap::send_response(false, "init failed");
+                        }
                     }
                 }
                 Err(e) => {
-                    kprintln!("  HOTSWAP: compile error: {:?}", e);
-                    net::hotswap::send_response(false, "compile error");
+                    kprintln!("  HOTSWAP: load error: {}", e);
+                    net::hotswap::send_response(false, &e);
                 }
             }
         }
 
-        // Tick Silverfir WASM app (if loaded)
+        // Tick WASM DSP app (if loaded)
         unsafe {
-            if let Some(ref mut instance) = SILVERFIR_INSTANCE {
-                if instance.is_healthy() {
-                    if let Err(e) = instance.tick() {
-                        kprintln!("  Silverfir TRAP: {:?}", e);
+            if let Some(ref mut app) = WASM_APP {
+                if app.is_healthy() {
+                    match app.tick() {
+                        wasm::runtime::DaqWasmResult::Ok => {}
+                        wasm::runtime::DaqWasmResult::OutOfFuel => {
+                            kprintln!("  WASM: out of fuel (tick too expensive)");
+                        }
+                        wasm::runtime::DaqWasmResult::Trap(msg) => {
+                            kprintln!("  WASM TRAP: {}", msg);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -244,11 +251,11 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
                 kprintln!("  Ring: {} samples buffered", avail);
             }
 
-            // Report Silverfir status
+            // Report WASM app status
             unsafe {
-                if let Some(ref instance) = SILVERFIR_INSTANCE {
-                    kprintln!("  Silverfir: {} ticks, healthy={}",
-                        instance.tick_count(), instance.is_healthy());
+                if let Some(ref app) = WASM_APP {
+                    kprintln!("  WASM: {} ticks, healthy={}",
+                        app.tick_count(), app.is_healthy());
                 }
             }
         }

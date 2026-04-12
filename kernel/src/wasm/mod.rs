@@ -1,16 +1,10 @@
-//! WASM Runtime — Silverfir-nano host function interface
+//! WASM Runtime for Folkering DAQ
 //!
-//! This module defines the host functions that WASM apps can call
-//! to interact with the DAQ subsystem and kernel services.
+//! Uses wasmi (industry-standard WASM interpreter) for correct,
+//! spec-compliant execution of DSP apps.
 //!
-//! Unlike Folkering OS (main), this runtime is stripped of all ML/AI
-//! functions and focused purely on:
-//!   - Sensor data access (ring buffer reads)
-//!   - DSP output (processed data writes)
-//!   - System timing
-//!   - Display output (minimal compositor commands)
-//!
-//! Silverfir-nano will JIT-compile WASM modules and link these
-//! host functions at load time.
+//! Host functions (folk_daq_*) bridge between WASM apps and the
+//! kernel's ring buffer / sensor subsystem.
 
+pub mod runtime;
 pub mod host_functions;

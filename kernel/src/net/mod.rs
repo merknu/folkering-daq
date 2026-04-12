@@ -10,6 +10,7 @@ pub mod socket;
 pub mod mdns;
 pub mod websocket;
 pub mod hotswap;
+pub mod tcp_shell;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy;
@@ -113,8 +114,8 @@ static mut HOTSWAP_RX_BUF: [u8; 262144] = [0; 262144]; // 256 KiB (full WASM bin
 static mut HOTSWAP_TX_BUF: [u8; 256] = [0; 256];         // Small response buffer
 
 // Socket set storage
-static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 4] =
-    [smoltcp::iface::SocketStorage::EMPTY; 4];
+static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 6] =
+    [smoltcp::iface::SocketStorage::EMPTY; 6];
 static mut SOCKETS: Option<SocketSet<'static>> = None;
 
 // WebSocket handshake state
@@ -191,8 +192,11 @@ pub fn init() {
         WS_UPGRADED = false;
     }
 
+    // Initialize TCP remote shell on port 2222
+    unsafe { tcp_shell::init(SOCKETS.as_mut().unwrap()); }
+
     NET_READY.store(true, Ordering::SeqCst);
-    crate::kprintln!("  NET: stack ready, TCP :7420 (openDAQ) + :7421 (hotswap) + UDP :5353");
+    crate::kprintln!("  NET: stack ready, TCP :7420 (openDAQ) + :7421 (hotswap) + :2222 (shell) + UDP :5353");
 }
 
 /// Poll network — call from main loop
@@ -215,6 +219,9 @@ pub fn poll() {
 
         // Handle WASM hot-swap connections
         handle_hotswap_tcp(sockets);
+
+        // TCP remote shell
+        tcp_shell::poll(sockets);
     }
 }
 

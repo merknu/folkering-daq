@@ -1,7 +1,11 @@
-//! Memory management — heap allocator + page frame allocator
+//! Memory management — heap allocator + page frame allocator + JIT support
 //!
 //! Uses Limine memory map to find usable regions.
 //! Heap is allocated from the largest usable region.
+//! JIT module provides W^X memory for Silverfir-nano code generation.
+
+pub mod jit;
+pub mod pagetable;
 
 use linked_list_allocator::LockedHeap;
 use crate::MemoryRegion;

@@ -25,6 +25,8 @@ pub mod net;
 pub mod daq;
 pub mod memory;
 pub mod task;
+pub mod wasm;
+pub mod silverfir;
 pub mod panic;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -137,10 +139,22 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
     // openDAQ server (works on both platforms once networking is up)
     daq::init();
-    kprintln!("[OK] openDAQ signal descriptors");
+    kprintln!("[OK] openDAQ signal descriptors + ring buffers");
+
+    // Phase 6: Silverfir-nano WASM runtime
+    kprintln!("[OK] Silverfir-nano JIT runtime ready");
+    kprintln!("     Host functions: {} registered", wasm::host_functions::HOST_FUNCTIONS.len());
+
+    // Load WASM apps from initrd / embedded modules (future: network hot-swap)
+    // For now, Silverfir is available but no apps are pre-loaded.
+    // Apps can be uploaded via network and JIT-compiled on-the-fly.
+    static mut SILVERFIR_INSTANCE: Option<silverfir::runtime::SilverfirInstance> = None;
 
     kprintln!("\n*** Folkering DAQ ready ***");
     kprintln!("  Timer freq: {} Hz", arch::aarch64::counter_freq());
+    kprintln!("  Ring buffer: {} KiB ({} channels)",
+        daq::ring_memory_size() / 1024, usb::sirius::NUM_CHANNELS + 1);
+    kprintln!("  Silverfir: awaiting WASM modules (hot-swap via network)");
     kprintln!("");
 
     // Timer IRQs disabled for now — we use counter-based polling
@@ -157,6 +171,17 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
         daq::poll();
 
+        // Tick Silverfir WASM app (if loaded)
+        unsafe {
+            if let Some(ref mut instance) = SILVERFIR_INSTANCE {
+                if instance.is_healthy() {
+                    if let Err(e) = instance.tick() {
+                        kprintln!("  Silverfir TRAP: {:?}", e);
+                    }
+                }
+            }
+        }
+
         // Periodic status (every ~5 seconds)
         let now = arch::aarch64::timer::millis();
         if now - last_status >= 5000 {
@@ -166,6 +191,20 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
             #[cfg(feature = "pi5")]
             if usb::sirius::is_streaming() {
                 kprintln!("  SIRIUS: {} packets", usb::sirius::packets_received());
+            }
+
+            // Report ring buffer fill level
+            let avail = daq::available_samples();
+            if avail > 0 {
+                kprintln!("  Ring: {} samples buffered", avail);
+            }
+
+            // Report Silverfir status
+            unsafe {
+                if let Some(ref instance) = SILVERFIR_INSTANCE {
+                    kprintln!("  Silverfir: {} ticks, healthy={}",
+                        instance.tick_count(), instance.is_healthy());
+                }
             }
         }
 

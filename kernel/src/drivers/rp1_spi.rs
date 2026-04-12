@@ -223,6 +223,11 @@ pub fn write(data: &[u8]) -> usize {
     data.len()
 }
 
+/// Get SPI base address (for ISR direct register access)
+pub fn spi_base() -> u64 {
+    SPI_BASE.load(Ordering::Relaxed)
+}
+
 /// Read SPI register (for debugging)
 pub fn read_status() -> u32 {
     let base = SPI_BASE.load(Ordering::Relaxed);

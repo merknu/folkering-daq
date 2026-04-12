@@ -116,6 +116,22 @@ fn push_to_ringbuffer(data: &[[i16; FRAMES_PER_PACKET]; NUM_CHANNELS]) {
     mgr.produce_channel(0, &f32_buf[..FRAMES_PER_PACKET]);
 }
 
+// === ISR API (called from interrupt context) ===
+
+/// Push a single f32 sample into a channel's ring buffer.
+/// Designed to be called from ISR — no allocation, no locking.
+pub fn push_sample(channel: usize, sample: f32) {
+    let mgr = unsafe {
+        match &RING_MANAGER {
+            Some(m) => m,
+            None => return,
+        }
+    };
+    if let Some(buf) = &mgr.buffers[channel] {
+        buf.produce_one(sample);
+    }
+}
+
 // === Public API for WASM host functions ===
 
 /// Read samples from a channel's ring buffer.

@@ -26,6 +26,7 @@ pub mod daq;
 pub mod memory;
 pub mod task;
 pub mod wasm;
+pub mod storage;
 #[cfg(feature = "silverfir-jit")]
 pub mod silverfir;
 pub mod panic;

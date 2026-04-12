@@ -22,8 +22,11 @@ use crate::usb::sirius::{FRAMES_PER_PACKET, NUM_CHANNELS};
 
 static DAQ_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Global ring buffer manager — initialized once at boot
+/// Global ring buffer managers — initialized once at boot
+/// INPUT: USB ISR writes raw ADC data here, WASM reads from here
+/// OUTPUT: WASM writes filtered/processed data here, network reads from here
 static mut RING_MANAGER: Option<DaqRingManager> = None;
+static mut OUTPUT_RING_MANAGER: Option<DaqRingManager> = None;
 
 /// Memory region for ring buffers (statically allocated to avoid heap fragmentation)
 /// 9 channels × (128 header + 8192 × 4 data) = 9 × 32896 = ~296 KiB
@@ -33,6 +36,7 @@ const RING_BUF_SIZE: usize = DaqRingManager::total_bytes(NUM_CHANNELS, DEFAULT_C
 struct RingMemory([u8; RING_BUF_SIZE]);
 
 static mut RING_MEMORY: RingMemory = RingMemory([0u8; RING_BUF_SIZE]);
+static mut OUTPUT_RING_MEMORY: RingMemory = RingMemory([0u8; RING_BUF_SIZE]);
 
 pub fn init() {
     signal::init_signals();
@@ -45,10 +49,15 @@ pub fn init() {
             NUM_CHANNELS,
             DEFAULT_CAPACITY,
         ));
+        OUTPUT_RING_MANAGER = Some(DaqRingManager::init(
+            OUTPUT_RING_MEMORY.0.as_mut_ptr(),
+            NUM_CHANNELS,
+            DEFAULT_CAPACITY,
+        ));
     }
 
-    crate::kprintln!("  DAQ: Ring buffers initialized ({} KiB, {} channels)",
-        RING_BUF_SIZE / 1024, NUM_CHANNELS + 1);
+    crate::kprintln!("  DAQ: Ring buffers initialized ({}+{} KiB, {} ch × input/output)",
+        RING_BUF_SIZE / 1024, RING_BUF_SIZE / 1024, NUM_CHANNELS + 1);
 
     DAQ_RUNNING.store(true, Ordering::SeqCst);
 }
@@ -132,8 +141,44 @@ pub fn available_samples() -> u32 {
     mgr.min_available()
 }
 
-/// Get the base pointer of the ring buffer memory region
-/// (for direct mapping into WASM linear memory)
+// === Output Ring Buffer API (WASM writes, network reads) ===
+
+/// Write processed/filtered samples to the output ring buffer.
+/// Called by WASM host function folk_daq_write_output.
+pub fn write_channel_output(channel: usize, samples: &[f32]) -> usize {
+    let mgr = unsafe {
+        match &OUTPUT_RING_MANAGER {
+            Some(m) => m,
+            None => return 0,
+        }
+    };
+    mgr.produce_channel(channel, samples)
+}
+
+/// Read processed samples from the output ring buffer.
+/// Called by the network layer for retransmission of filtered data.
+pub fn read_output_samples(channel: usize, out: &mut [f32]) -> usize {
+    let mgr = unsafe {
+        match &OUTPUT_RING_MANAGER {
+            Some(m) => m,
+            None => return 0,
+        }
+    };
+    mgr.consume_channel(channel, out)
+}
+
+/// Get available processed samples in the output ring buffer.
+pub fn output_available() -> u32 {
+    let mgr = unsafe {
+        match &OUTPUT_RING_MANAGER {
+            Some(m) => m,
+            None => return 0,
+        }
+    };
+    mgr.min_available()
+}
+
+/// Get the base pointer of the input ring buffer memory region
 pub fn ring_memory_base() -> *const u8 {
     unsafe { RING_MEMORY.0.as_ptr() }
 }

@@ -105,10 +105,7 @@ pub fn folk_daq_write_output(
         )
     };
 
-    // TODO: Write to output ring buffer (for network retransmission or DAC)
-    // For now, return count to indicate success
-    let _ = (channel, samples);
-    count as i32
+    crate::daq::write_channel_output(channel, samples) as i32
 }
 
 /// Get a monotonic nanosecond timestamp.

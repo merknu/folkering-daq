@@ -140,12 +140,10 @@ pub extern "C" fn tick() -> i32 {
         let one_minus_alpha = 1.0 - alpha;
 
         for ch in 0..NUM_CHANNELS {
-            let ch_idx = (ch + 1) as usize; // +1 because channel 0 is time domain
-
             // Read raw samples from ring buffer
             let read = folk_daq_read_samples(
                 ch + 1, // channel index (1-based for ADC)
-                INPUT_BUF.as_ptr() as i32,
+                &raw const INPUT_BUF as i32,
                 to_process,
             );
 
@@ -168,7 +166,7 @@ pub extern "C" fn tick() -> i32 {
             // Write filtered samples to output
             folk_daq_write_output(
                 ch + 1,
-                OUTPUT_BUF.as_ptr() as i32,
+                &raw const OUTPUT_BUF as i32,
                 read,
             );
         }

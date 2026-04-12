@@ -1,0 +1,15 @@
+[package]
+name = "fft-analyzer"
+version = "0.1.0"
+edition = "2021"
+description = "Radix-2 FFT spectrum analyzer for Folkering DAQ"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

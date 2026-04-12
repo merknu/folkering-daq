@@ -1,3 +1,4 @@
 [workspace]
 members = ["kernel"]
+exclude = ["apps/lowpass_filter", "apps/bandpass_filter", "apps/peak_detector", "apps/fft_analyzer"]
 resolver = "2"

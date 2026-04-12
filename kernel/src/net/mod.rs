@@ -11,6 +11,7 @@ pub mod mdns;
 pub mod websocket;
 pub mod hotswap;
 pub mod tcp_shell;
+pub mod wifi;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy;

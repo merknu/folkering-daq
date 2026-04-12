@@ -331,12 +331,6 @@ impl CodeEmitter {
 
     // === i32 Arithmetic ===
 
-    fn emit_i32_binop(&mut self, _op: &str) {
-        // Pop two operands, apply op, push result
-        // This is a simplified version — real impl needs register allocation
-        self.stack_depth -= 1; // net: pop 2, push 1
-    }
-
     fn emit_i32_add(&mut self) {
         #[cfg(target_arch = "x86_64")]
         {
@@ -393,37 +387,385 @@ impl CodeEmitter {
         self.stack_depth -= 1;
     }
 
-    fn emit_i32_and(&mut self) { self.emit_i32_binop("and"); }
-    fn emit_i32_or(&mut self) { self.emit_i32_binop("or"); }
-    fn emit_i32_xor(&mut self) { self.emit_i32_binop("xor"); }
-    fn emit_i32_shl(&mut self) { self.emit_i32_binop("shl"); }
-    fn emit_i32_shr_s(&mut self) { self.emit_i32_binop("shr_s"); }
-    fn emit_i32_eq(&mut self) { self.emit_i32_binop("eq"); }
-    fn emit_i32_lt_s(&mut self) { self.emit_i32_binop("lt_s"); }
-    fn emit_i32_gt_s(&mut self) { self.emit_i32_binop("gt_s"); }
-    fn emit_i32_le_s(&mut self) { self.emit_i32_binop("le_s"); }
+    fn emit_i32_and(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x21, 0xC8]); // and eax, ecx
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
 
-    // === f32 Arithmetic (stub — needs FP register usage) ===
+    fn emit_i32_or(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x09, 0xC8]); // or eax, ecx
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
 
-    fn emit_f32_binop(&mut self) { self.stack_depth -= 1; }
-    fn emit_f32_add(&mut self) { self.emit_f32_binop(); }
-    fn emit_f32_sub(&mut self) { self.emit_f32_binop(); }
-    fn emit_f32_mul(&mut self) { self.emit_f32_binop(); }
-    fn emit_f32_div(&mut self) { self.emit_f32_binop(); }
-    fn emit_f32_abs(&mut self) { /* unary, no stack change */ }
-    fn emit_f32_neg(&mut self) { /* unary, no stack change */ }
-    fn emit_f32_sqrt(&mut self) { /* unary, no stack change */ }
+    fn emit_i32_xor(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x31, 0xC8]); // xor eax, ecx
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
 
-    // === Memory Operations (stub) ===
-    fn emit_i32_load(&mut self, _offset: u32) { /* pop addr, push value */ }
-    fn emit_i32_store(&mut self, _offset: u32) { self.stack_depth -= 2; }
-    fn emit_f32_load(&mut self, _offset: u32) { /* pop addr, push value */ }
-    fn emit_f32_store(&mut self, _offset: u32) { self.stack_depth -= 2; }
+    fn emit_i32_shl(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); // pop rcx (shift amount — cl)
+            self.emit_byte(0x58); // pop rax (value)
+            self.emit_bytes(&[0xD3, 0xE0]); // shl eax, cl
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
 
-    // === Locals (stub) ===
-    fn emit_local_get(&mut self, _idx: u32) { self.stack_depth += 1; }
-    fn emit_local_set(&mut self, _idx: u32) { self.stack_depth -= 1; }
-    fn emit_local_tee(&mut self, _idx: u32) { /* no stack change */ }
+    fn emit_i32_shr_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0xD3, 0xF8]); // sar eax, cl
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_i32_eq(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x39, 0xC8]); // cmp eax, ecx
+            self.emit_bytes(&[0x0F, 0x94, 0xC0]); // sete al
+            self.emit_bytes(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_i32_lt_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x39, 0xC8]); // cmp eax, ecx
+            self.emit_bytes(&[0x0F, 0x9C, 0xC0]); // setl al
+            self.emit_bytes(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_i32_gt_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x39, 0xC8]); // cmp eax, ecx
+            self.emit_bytes(&[0x0F, 0x9F, 0xC0]); // setg al
+            self.emit_bytes(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_i32_le_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); self.emit_byte(0x58);
+            self.emit_bytes(&[0x39, 0xC8]); // cmp eax, ecx
+            self.emit_bytes(&[0x0F, 0x9E, 0xC0]); // setle al
+            self.emit_bytes(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+            self.emit_byte(0x50);
+        }
+        self.stack_depth -= 1;
+    }
+
+    // === f32 Arithmetic ===
+    //
+    // Strategy: pop raw bits from integer stack into XMM/NEON registers,
+    // perform FP operation, push result bits back.
+    //
+    // x86_64:  movd xmm0, [rsp]; movd xmm1, [rsp+4]; op; movd [rsp], xmm0
+    // aarch64: ldr s0, [sp]; ldr s1, [sp, #4]; op; str s0, [sp, #4]; add sp, #4
+
+    fn emit_f32_add(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // movss xmm1, [rsp]     — top of stack (right operand)
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x0C, 0x24]);
+            // add rsp, 4
+            self.emit_bytes(&[0x48, 0x83, 0xC4, 0x04]);
+            // movss xmm0, [rsp]     — second operand (left)
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]);
+            // addss xmm0, xmm1
+            self.emit_bytes(&[0xF3, 0x0F, 0x58, 0xC1]);
+            // movss [rsp], xmm0     — store result
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0xE1, 0x07, 0x40, 0xBD]); // ldr s1, [sp, #4]
+            self.emit_bytes(&[0x20, 0x28, 0x21, 0x1E]); // fadd s0, s1, s0
+            self.emit_bytes(&[0xFF, 0x43, 0x00, 0x91]); // add sp, sp, #4 (pop one)
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_f32_sub(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x0C, 0x24]); // movss xmm1, [rsp]
+            self.emit_bytes(&[0x48, 0x83, 0xC4, 0x04]);         // add rsp, 4
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x5C, 0xC1]);         // subss xmm0, xmm1
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0xE1, 0x07, 0x40, 0xBD]); // ldr s1, [sp, #4]
+            self.emit_bytes(&[0x20, 0x38, 0x20, 0x1E]); // fsub s0, s1, s0
+            self.emit_bytes(&[0xFF, 0x43, 0x00, 0x91]); // add sp, sp, #4
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_f32_mul(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x0C, 0x24]); // movss xmm1, [rsp]
+            self.emit_bytes(&[0x48, 0x83, 0xC4, 0x04]);         // add rsp, 4
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x59, 0xC1]);         // mulss xmm0, xmm1
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0xE1, 0x07, 0x40, 0xBD]); // ldr s1, [sp, #4]
+            self.emit_bytes(&[0x20, 0x08, 0x20, 0x1E]); // fmul s0, s1, s0
+            self.emit_bytes(&[0xFF, 0x43, 0x00, 0x91]); // add sp, sp, #4
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_f32_div(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x0C, 0x24]); // movss xmm1, [rsp]
+            self.emit_bytes(&[0x48, 0x83, 0xC4, 0x04]);         // add rsp, 4
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x5E, 0xC1]);         // divss xmm0, xmm1
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0xE1, 0x07, 0x40, 0xBD]); // ldr s1, [sp, #4]
+            self.emit_bytes(&[0x20, 0x18, 0x20, 0x1E]); // fdiv s0, s1, s0
+            self.emit_bytes(&[0xFF, 0x43, 0x00, 0x91]); // add sp, sp, #4
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_f32_abs(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // movss xmm0, [rsp]; andps xmm0, [abs_mask]; movss [rsp], xmm0
+            // Simpler: movd eax, [rsp]; and eax, 0x7FFFFFFF; mov [rsp], eax
+            self.emit_byte(0x58); // pop rax
+            self.emit_bytes(&[0x25]); // and eax, imm32
+            self.emit_bytes(&0x7FFFFFFFu32.to_le_bytes());
+            self.emit_byte(0x50); // push rax
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0x00, 0xC0, 0x20, 0x1E]); // fabs s0, s0
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+        // unary — no stack depth change
+    }
+
+    fn emit_f32_neg(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // xor top bit: xor [rsp], 0x80000000
+            self.emit_byte(0x58); // pop rax
+            self.emit_bytes(&[0x35]); // xor eax, imm32
+            self.emit_bytes(&0x80000000u32.to_le_bytes());
+            self.emit_byte(0x50); // push rax
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0x00, 0x40, 0x21, 0x1E]); // fneg s0, s0
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+    }
+
+    fn emit_f32_sqrt(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x51, 0xC0]);         // sqrtss xmm0, xmm0
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0x00, 0xC0, 0x21, 0x1E]); // fsqrt s0, s0
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+    }
+
+    // === Memory Operations ===
+    //
+    // Linear memory base is passed in rdi (x86_64) or x0 (aarch64).
+    // WASM address = pop from stack, add offset, add to base → load/store.
+
+    fn emit_i32_load(&mut self, offset: u32) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x58); // pop rax (WASM address)
+            if offset > 0 {
+                // add eax, offset
+                self.emit_bytes(&[0x05]);
+                self.emit_bytes(&offset.to_le_bytes());
+            }
+            // mov eax, [rdi + rax]  (rdi = linear_memory base)
+            self.emit_bytes(&[0x8B, 0x04, 0x07]); // mov eax, [rdi+rax]
+            self.emit_byte(0x50); // push rax
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE9, 0x07, 0x41, 0xB8]); // ldr w9, [sp], #4 (pop addr)
+            if offset > 0 {
+                // add w9, w9, #offset (only works for small offsets)
+                let imm12 = offset.min(4095);
+                let enc = 0x11000000 | ((imm12 & 0xFFF) << 10) | (9 << 5) | 9;
+                self.emit_bytes(&enc.to_le_bytes());
+            }
+            // ldr w9, [x0, w9, uxtw]  (x0 = linear_memory base)
+            self.emit_bytes(&[0x09, 0x48, 0x69, 0xB8]); // ldr w9, [x0, x9]
+            self.emit_bytes(&[0xE9, 0x0F, 0x1F, 0xB8]); // str w9, [sp, #-4]! (push)
+        }
+        // net: pop addr, push value → no change
+    }
+
+    fn emit_i32_store(&mut self, offset: u32) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.emit_byte(0x59); // pop rcx (value)
+            self.emit_byte(0x58); // pop rax (address)
+            if offset > 0 {
+                self.emit_bytes(&[0x05]);
+                self.emit_bytes(&offset.to_le_bytes());
+            }
+            // mov [rdi + rax], ecx
+            self.emit_bytes(&[0x89, 0x0C, 0x07]); // mov [rdi+rax], ecx
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xEA, 0x07, 0x41, 0xB8]); // ldr w10, [sp], #4 (pop value)
+            self.emit_bytes(&[0xE9, 0x07, 0x41, 0xB8]); // ldr w9, [sp], #4 (pop addr)
+            if offset > 0 {
+                let imm12 = offset.min(4095);
+                let enc = 0x11000000 | ((imm12 & 0xFFF) << 10) | (9 << 5) | 9;
+                self.emit_bytes(&enc.to_le_bytes());
+            }
+            // str w10, [x0, x9]
+            self.emit_bytes(&[0x0A, 0x68, 0x29, 0xB8]); // str w10, [x0, x9]
+        }
+        self.stack_depth -= 2;
+    }
+
+    fn emit_f32_load(&mut self, offset: u32) {
+        // f32.load is identical to i32.load (same bit pattern, 4 bytes)
+        self.emit_i32_load(offset);
+    }
+
+    fn emit_f32_store(&mut self, offset: u32) {
+        // f32.store is identical to i32.store (same bit pattern, 4 bytes)
+        self.emit_i32_store(offset);
+    }
+
+    // === Local Variables ===
+    //
+    // Locals are stored on the native stack frame, below the saved rbp/x29.
+    // local[i] is at [rbp - (i+1)*8] on x86_64, [x29 - (i+1)*8] on aarch64.
+
+    fn emit_local_get(&mut self, idx: u32) {
+        let frame_offset = (idx + 1) * 8;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // mov rax, [rbp - frame_offset]; push rax
+            self.emit_bytes(&[0x48, 0x8B, 0x85]); // mov rax, [rbp + disp32]
+            self.emit_bytes(&(-(frame_offset as i32)).to_le_bytes());
+            self.emit_byte(0x50); // push rax
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // ldr x9, [x29, #-frame_offset]; str x9, [sp, #-8]!
+            let off = frame_offset.min(255);
+            // ldur x9, [x29, #-off]
+            let enc = 0xF8400000 | ((((-( off as i32)) as u32) & 0x1FF) << 12) | (29 << 5) | 9;
+            self.emit_bytes(&enc.to_le_bytes());
+            self.emit_bytes(&[0xE9, 0x0F, 0x1F, 0xF8]); // str x9, [sp, #-8]!
+        }
+        self.stack_depth += 1;
+    }
+
+    fn emit_local_set(&mut self, idx: u32) {
+        let frame_offset = (idx + 1) * 8;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // pop rax; mov [rbp - frame_offset], rax
+            self.emit_byte(0x58); // pop rax
+            self.emit_bytes(&[0x48, 0x89, 0x85]); // mov [rbp + disp32], rax
+            self.emit_bytes(&(-(frame_offset as i32)).to_le_bytes());
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // ldr x9, [sp], #8; stur x9, [x29, #-off]
+            self.emit_bytes(&[0xE9, 0x07, 0x41, 0xF8]); // ldr x9, [sp], #8
+            let off = frame_offset.min(255);
+            let enc = 0xF8000000 | ((((-( off as i32)) as u32) & 0x1FF) << 12) | (29 << 5) | 9;
+            self.emit_bytes(&enc.to_le_bytes());
+        }
+        self.stack_depth -= 1;
+    }
+
+    fn emit_local_tee(&mut self, idx: u32) {
+        let frame_offset = (idx + 1) * 8;
+        #[cfg(target_arch = "x86_64")]
+        {
+            // mov rax, [rsp]; mov [rbp - frame_offset], rax (peek, don't pop)
+            self.emit_bytes(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+            self.emit_bytes(&[0x48, 0x89, 0x85]); // mov [rbp + disp32], rax
+            self.emit_bytes(&(-(frame_offset as i32)).to_le_bytes());
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // ldr x9, [sp]; stur x9, [x29, #-off]
+            self.emit_bytes(&[0xE9, 0x03, 0x40, 0xF9]); // ldr x9, [sp]
+            let off = frame_offset.min(255);
+            let enc = 0xF8000000 | ((((-( off as i32)) as u32) & 0x1FF) << 12) | (29 << 5) | 9;
+            self.emit_bytes(&enc.to_le_bytes());
+        }
+        // no stack depth change — value stays on stack
+    }
 
     // === Control Flow (stub) ===
     fn emit_block_start(&mut self) {
@@ -482,9 +824,40 @@ impl CodeEmitter {
         self.emit_bytes(&[0x1F, 0x20, 0x03, 0xD5]); // nop
     }
 
-    // === Conversions (stub) ===
-    fn emit_i32_trunc_f32_s(&mut self) { /* convert top of stack */ }
-    fn emit_f32_convert_i32_s(&mut self) { /* convert top of stack */ }
+    // === Conversions ===
+
+    fn emit_i32_trunc_f32_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // movss xmm0, [rsp]; cvttss2si eax, xmm0; mov [rsp], eax
+            self.emit_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]); // movss xmm0, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x2C, 0xC0]);         // cvttss2si eax, xmm0
+            self.emit_bytes(&[0x89, 0x04, 0x24]);                 // mov [rsp], eax
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE0, 0x03, 0x40, 0xBD]); // ldr s0, [sp]
+            self.emit_bytes(&[0x09, 0x00, 0x38, 0x1E]); // fcvtzs w9, s0
+            self.emit_bytes(&[0xE9, 0x03, 0x00, 0xB9]); // str w9, [sp]
+        }
+        // no stack depth change — f32 becomes i32 in same slot
+    }
+
+    fn emit_f32_convert_i32_s(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // mov eax, [rsp]; cvtsi2ss xmm0, eax; movss [rsp], xmm0
+            self.emit_bytes(&[0x8B, 0x04, 0x24]);                 // mov eax, [rsp]
+            self.emit_bytes(&[0xF3, 0x0F, 0x2A, 0xC0]);         // cvtsi2ss xmm0, eax
+            self.emit_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]); // movss [rsp], xmm0
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.emit_bytes(&[0xE9, 0x03, 0x40, 0xB9]); // ldr w9, [sp]
+            self.emit_bytes(&[0x20, 0x01, 0x22, 0x1E]); // scvtf s0, w9
+            self.emit_bytes(&[0xE0, 0x03, 0x00, 0xBD]); // str s0, [sp]
+        }
+    }
 
     // === Helpers ===
 

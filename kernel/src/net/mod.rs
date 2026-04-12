@@ -9,6 +9,7 @@
 pub mod socket;
 pub mod mdns;
 pub mod websocket;
+pub mod hotswap;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy;
@@ -104,7 +105,12 @@ static mut UDP_TX_BUF: [u8; UDP_TX_SIZE] = [0; UDP_TX_SIZE];
 static mut DEVICE: Option<GemDevice> = None;
 static mut IFACE: Option<Interface> = None;
 static mut TCP_HANDLE: Option<SocketHandle> = None;
+static mut TCP_HOTSWAP_HANDLE: Option<SocketHandle> = None;
 static mut UDP_HANDLE: Option<SocketHandle> = None;
+
+// Hotswap socket buffers
+static mut HOTSWAP_RX_BUF: [u8; 262144] = [0; 262144]; // 256 KiB (full WASM binary)
+static mut HOTSWAP_TX_BUF: [u8; 256] = [0; 256];         // Small response buffer
 
 // Socket set storage
 static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 4] =
@@ -164,6 +170,14 @@ pub fn init() {
         let tcp_h = sockets.add(tcp_socket);
         TCP_HANDLE = Some(tcp_h);
 
+        // TCP socket for WASM hot-swap (port 7421)
+        let hs_rx = tcp::SocketBuffer::new(&mut HOTSWAP_RX_BUF[..]);
+        let hs_tx = tcp::SocketBuffer::new(&mut HOTSWAP_TX_BUF[..]);
+        let mut hs_socket = tcp::Socket::new(hs_rx, hs_tx);
+        hs_socket.listen(hotswap::HOTSWAP_PORT).unwrap();
+        let hs_h = sockets.add(hs_socket);
+        TCP_HOTSWAP_HANDLE = Some(hs_h);
+
         // UDP socket for mDNS (port 5353)
         let udp_rx = udp::PacketBuffer::new(&mut UDP_RX_META[..], &mut UDP_RX_BUF[..]);
         let udp_tx = udp::PacketBuffer::new(&mut UDP_TX_META[..], &mut UDP_TX_BUF[..]);
@@ -178,7 +192,7 @@ pub fn init() {
     }
 
     NET_READY.store(true, Ordering::SeqCst);
-    crate::kprintln!("  NET: stack ready, TCP :7420 + UDP :5353");
+    crate::kprintln!("  NET: stack ready, TCP :7420 (openDAQ) + :7421 (hotswap) + UDP :5353");
 }
 
 /// Poll network — call from main loop
@@ -198,6 +212,9 @@ pub fn poll() {
 
         // Handle openDAQ TCP connections
         handle_opendaq_tcp(sockets);
+
+        // Handle WASM hot-swap connections
+        handle_hotswap_tcp(sockets);
     }
 }
 
@@ -289,6 +306,46 @@ pub fn tcp_send_raw(data: &[u8]) -> Result<(), &'static str> {
     }
 
     Ok(())
+}
+
+/// Send data on the hotswap TCP socket (port 7421)
+pub fn tcp_send_on_port(port: u16, data: &[u8]) -> Result<(), &'static str> {
+    if !NET_READY.load(Ordering::Relaxed) { return Err("net not ready"); }
+
+    unsafe {
+        let sockets = SOCKETS.as_mut().unwrap();
+        let handle = if port == hotswap::HOTSWAP_PORT {
+            TCP_HOTSWAP_HANDLE.unwrap()
+        } else {
+            TCP_HANDLE.unwrap()
+        };
+        let socket = sockets.get_mut::<tcp::Socket>(handle);
+        if !socket.can_send() { return Err("send buffer full"); }
+        socket.send_slice(data).map_err(|_| "send error")?;
+    }
+    Ok(())
+}
+
+/// Handle WASM hot-swap TCP connections on port 7421
+unsafe fn handle_hotswap_tcp(sockets: &mut SocketSet) {
+    let hs_h = match TCP_HOTSWAP_HANDLE { Some(h) => h, None => return };
+    let socket = sockets.get_mut::<tcp::Socket>(hs_h);
+
+    if !socket.is_active() {
+        hotswap::on_disconnect();
+        let _ = socket.listen(hotswap::HOTSWAP_PORT);
+        return;
+    }
+
+    // Read incoming WASM data
+    if socket.may_recv() {
+        let mut recv_buf = [0u8; 4096];
+        if let Ok(n) = socket.recv_slice(&mut recv_buf) {
+            if n > 0 {
+                hotswap::on_data_received(&recv_buf[..n]);
+            }
+        }
+    }
 }
 
 /// Legacy WebSocket send (kept for future browser-based clients)

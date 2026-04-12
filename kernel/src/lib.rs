@@ -171,6 +171,28 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
 
         daq::poll();
 
+        // Check for hot-swap: compile and load new WASM module from network
+        if let Some(wasm_bytes) = net::hotswap::take_pending_wasm() {
+            kprintln!("  HOTSWAP: compiling {} bytes...", wasm_bytes.len());
+            match silverfir::SilverfirModule::load(&wasm_bytes) {
+                Ok(module) => {
+                    let mut instance = silverfir::runtime::SilverfirInstance::new(module);
+                    if let Err(e) = instance.init() {
+                        kprintln!("  HOTSWAP: init failed: {:?}", e);
+                        net::hotswap::send_response(false, "init failed");
+                    } else {
+                        kprintln!("  HOTSWAP: module loaded and initialized");
+                        unsafe { SILVERFIR_INSTANCE = Some(instance); }
+                        net::hotswap::send_response(true, "module loaded");
+                    }
+                }
+                Err(e) => {
+                    kprintln!("  HOTSWAP: compile error: {:?}", e);
+                    net::hotswap::send_response(false, "compile error");
+                }
+            }
+        }
+
         // Tick Silverfir WASM app (if loaded)
         unsafe {
             if let Some(ref mut instance) = SILVERFIR_INSTANCE {

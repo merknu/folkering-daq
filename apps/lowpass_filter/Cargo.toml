@@ -1,0 +1,15 @@
+[package]
+name = "lowpass-filter"
+version = "0.1.0"
+edition = "2021"
+description = "First-order IIR low-pass filter for Folkering DAQ"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

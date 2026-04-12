@@ -133,6 +133,12 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
             kprintln!("[OK] RP1 I2C0 + I2C1 (DW I2C, 400 kHz)");
         }
 
+        // SDHCI → SDIO → CYW43455 WiFi
+        match drivers::sdhci::init() {
+            Ok(()) => kprintln!("[OK] SDHCI WiFi (CYW43455 via SDIO)"),
+            Err(e) => kprintln!("[WARN] SDHCI WiFi init failed: {}", e),
+        }
+
         drivers::xhci::init();
         kprintln!("[OK] xHCI USB controller");
 

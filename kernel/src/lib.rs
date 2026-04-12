@@ -134,10 +134,31 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
         }
 
         // SDHCI → SDIO → CYW43455 WiFi
-        match drivers::sdhci::init() {
-            Ok(()) => kprintln!("[OK] SDHCI WiFi (CYW43455 via SDIO)"),
-            Err(e) => kprintln!("[WARN] SDHCI WiFi init failed: {}", e),
+        #[cfg(feature = "wifi")]
+        {
+            match drivers::sdhci::init() {
+                Ok(()) => {
+                    kprintln!("[OK] SDHCI WiFi (CYW43455 via SDIO)");
+
+                    // Load embedded firmware and connect
+                    static CYW43_FW: &[u8] = include_bytes!("../../firmware/cyw43455_fw.bin");
+                    static CYW43_NVRAM: &[u8] = include_bytes!("../../firmware/cyw43455_nvram.txt");
+
+                    match drivers::cyw43::init(CYW43_FW, CYW43_NVRAM) {
+                        Ok(()) => {
+                            // TODO: Read SSID/password from config or NVRAM
+                            // For now, attempt connection with compiled-in credentials
+                            kprintln!("[OK] CYW43455 firmware loaded");
+                        }
+                        Err(e) => kprintln!("[WARN] CYW43455 init failed: {}", e),
+                    }
+                }
+                Err(e) => kprintln!("[WARN] SDHCI init failed: {}", e),
+            }
         }
+
+        #[cfg(not(feature = "wifi"))]
+        kprintln!("  WiFi: disabled (enable with --features wifi)");
 
         drivers::xhci::init();
         kprintln!("[OK] xHCI USB controller");

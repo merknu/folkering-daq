@@ -50,6 +50,7 @@ pi5 = []                   # Raspberry Pi 5 (BCM2712 + RP1)
 qemu-virt = []             # QEMU aarch64 virt machine
 embedded-dsp = []          # Embed lowpass_filter.wasm in kernel image
 silverfir-jit = []         # Enable experimental Silverfir JIT (future)
+wifi = []                  # Enable CYW43455 WiFi (embeds 614KB firmware)
 
 [profile.dev]
 panic = "abort"

@@ -1,3 +1,6 @@
 pub mod pci;
 pub mod xhci;
 pub mod gem;
+pub mod rp1_gpio;
+pub mod rp1_spi;
+pub mod rp1_i2c;

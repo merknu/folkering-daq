@@ -120,6 +120,19 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
         drivers::pci::init();
         kprintln!("[OK] PCIe / RP1 south bridge");
 
+        // RP1 peripheral drivers (GPIO must be first — SPI/I2C depend on it for pin mux)
+        if let Some(rp1) = drivers::pci::rp1() {
+            drivers::rp1_gpio::init(rp1.bar1_virt);
+            kprintln!("[OK] RP1 GPIO (28 pins)");
+
+            drivers::rp1_spi::init(rp1.bar1_virt, &drivers::rp1_spi::SpiConfig::default());
+            kprintln!("[OK] RP1 SPI0 (DW APB SSI)");
+
+            drivers::rp1_i2c::init(rp1.bar1_virt, drivers::rp1_i2c::I2cBus::I2C0, drivers::rp1_i2c::I2cSpeed::Fast);
+            drivers::rp1_i2c::init(rp1.bar1_virt, drivers::rp1_i2c::I2cBus::I2C1, drivers::rp1_i2c::I2cSpeed::Fast);
+            kprintln!("[OK] RP1 I2C0 + I2C1 (DW I2C, 400 kHz)");
+        }
+
         drivers::xhci::init();
         kprintln!("[OK] xHCI USB controller");
 

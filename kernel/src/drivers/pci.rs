@@ -33,6 +33,8 @@ pub struct Rp1Info {
     pub device: u8,
     pub function: u8,
     pub bar1_phys: u64,
+    /// BAR1 virtual base (via HHDM) — all RP1 peripherals are at bar1_virt + offset
+    pub bar1_virt: u64,
     /// Virtual addresses for RP1 sub-devices (via HHDM)
     pub eth_base: u64,
     pub xhci0_base: u64,
@@ -94,12 +96,14 @@ pub fn init() {
                 crate::kprintln!("  RP1 BAR1 = {:#x}", bar1);
 
                 // Map RP1 sub-devices via HHDM
+                let bar1_virt = crate::phys_to_virt(bar1);
                 let rp1 = Rp1Info {
                     bus, device: dev, function: 0,
                     bar1_phys: bar1,
-                    eth_base: crate::phys_to_virt(bar1 + RP1_ETH_OFFSET),
-                    xhci0_base: crate::phys_to_virt(bar1 + RP1_XHCI0_OFFSET),
-                    xhci1_base: crate::phys_to_virt(bar1 + RP1_XHCI1_OFFSET),
+                    bar1_virt,
+                    eth_base: bar1_virt + RP1_ETH_OFFSET,
+                    xhci0_base: bar1_virt + RP1_XHCI0_OFFSET,
+                    xhci1_base: bar1_virt + RP1_XHCI1_OFFSET,
                 };
 
                 crate::kprintln!("  RP1 Ethernet MAC: phys {:#x}", bar1 + RP1_ETH_OFFSET);

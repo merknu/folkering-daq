@@ -5,7 +5,7 @@
 //!   Port 7420: Native Streaming (raw binary data) — implemented
 //!
 //! Data pipeline:
-//!   USB ISR → SPSC Ring Buffer → { TCP broadcast (DewesoftX), WASM consumer (Silverfir) }
+//!   USB ISR → SPSC Ring Buffer → { TCP broadcast (DewesoftX), WASM consumer (wasmi) }
 //!
 //! The ring buffer is the single source of truth for sensor data.
 //! Both the network protocol and local WASM apps read from it.

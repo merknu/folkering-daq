@@ -2,7 +2,7 @@
 //!
 //! Zero-copy pipeline for sensor data:
 //!   Producer (ISR/driver) → writes raw samples into buffer
-//!   Consumer (Silverfir WASM app) → reads samples directly from shared memory
+//!   Consumer (WASM app via wasmi) → reads samples directly from shared memory
 //!
 //! Design constraints:
 //! - no_std, no locks, no syscalls on the hot path
@@ -131,7 +131,7 @@ impl SpscRingBuffer {
         true
     }
 
-    // === Consumer API (called from WASM runtime / Silverfir) ===
+    // === Consumer API (called from WASM runtime / wasmi) ===
 
     /// Try to read up to `max` samples into `out`. Returns number of samples read.
     /// Never blocks — returns 0 if buffer is empty.

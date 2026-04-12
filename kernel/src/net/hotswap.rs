@@ -4,7 +4,7 @@
 //! Protocol (dead simple):
 //!   1. Client connects to port 7421
 //!   2. Client sends: [4-byte LE length][WASM binary bytes]
-//!   3. Server compiles with Silverfir-nano
+//!   3. Server loads with wasmi interpreter
 //!   4. Server responds: "OK\n" or "ERR: <reason>\n"
 //!   5. If OK, the running DSP module is hot-swapped atomically
 //!

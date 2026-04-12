@@ -2,9 +2,11 @@
 //!
 //! Uses Limine memory map to find usable regions.
 //! Heap is allocated from the largest usable region.
-//! JIT module provides W^X memory for Silverfir-nano code generation.
+//! JIT module provides W^X memory for future Silverfir-nano code generation.
 
+#[cfg(feature = "silverfir-jit")]
 pub mod jit;
+#[cfg(feature = "silverfir-jit")]
 pub mod pagetable;
 
 use linked_list_allocator::LockedHeap;

@@ -61,24 +61,37 @@ const ATCM_RAM_BASE: u32 = 0x0000_0000; // ARM ATCM (tightly coupled memory)
 // Frame header for F2 data
 const SDPCM_HEADER_LEN: usize = 12;
 
-// ioctl commands
-const WLC_SET_SSID: u32     = 26;
-const WLC_SET_CHANNEL: u32  = 30;
-const WLC_DISASSOC: u32     = 52;
+// ioctl commands (WLC = Wireless LAN Controller)
+const WLC_UP: u32              = 2;
+const WLC_SET_INFRA: u32       = 20;
+const WLC_SET_AUTH: u32        = 22;
+const WLC_SET_SSID: u32        = 26;
+const WLC_SET_CHANNEL: u32     = 30;
 const WLC_SET_PASSIVE_SCAN: u32 = 49;
-const WLC_SCAN: u32         = 50;
-const WLC_SET_WSEC: u32     = 134;
-const WLC_SET_WPA_AUTH: u32 = 165;
-const WLC_SET_SSID_JOIN: u32 = 26;
-const WLC_SET_KEY: u32      = 45;
-const WLC_SET_INFRA: u32    = 20;
-const WLC_SET_AUTH: u32     = 22;
-const WLC_UP: u32           = 2;
+const WLC_SCAN: u32            = 50;
+const WLC_DISASSOC: u32        = 52;
+const WLC_SET_WSEC: u32        = 134;
+const WLC_SET_WPA_AUTH: u32    = 165;
+const WLC_SET_WSEC_PMK: u32    = 268; // Correct ioctl for passphrase (NOT WLC_SET_KEY=45)
 
 // WPA/Security constants
-const WSEC_TKIP: u32 = 0x02;
 const WSEC_AES: u32  = 0x04;
 const WPA2_AUTH_PSK: u32 = 0x80;
+
+// SDPCM channel types
+const SDPCM_CONTROL_CHANNEL: u8 = 0;
+const SDPCM_DATA_CHANNEL: u8    = 2;
+const SDPCM_EVENT_CHANNEL: u8   = 1;
+
+// Broadcom event types (subset)
+const WLC_E_LINK: u32       = 16;
+const WLC_E_AUTH: u32        = 3;
+const WLC_E_ASSOC: u32       = 0;
+const WLC_E_SET_SSID: u32    = 0;
+const WLC_E_PSK_SUP: u32     = 46;
+
+// BDC (Broadcom Dongle Control) header
+const BDC_HEADER_LEN: usize = 4; // flags(2) + priority(1) + data_offset(1)
 
 /// WiFi connection state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -270,59 +283,188 @@ fn start_firmware() -> Result<(), &'static str> {
 
 // === ioctl Interface ===
 
-/// Sequence number for SDPCM frames
-static mut IOCTL_SEQ: u16 = 0;
+/// Separate sequence counters for control and data channels
+static mut CTL_SEQ: u8 = 0;
+static mut DATA_SEQ: u8 = 0;
+/// ioctl request ID (incremented per ioctl, used to match responses)
+static mut IOCTL_ID: u16 = 0;
 
-/// Send an ioctl command to the firmware
+fn next_ctl_seq() -> u8 {
+    unsafe { let s = CTL_SEQ; CTL_SEQ = s.wrapping_add(1); s }
+}
+
+fn next_data_seq() -> u8 {
+    unsafe { let s = DATA_SEQ; DATA_SEQ = s.wrapping_add(1); s }
+}
+
+fn next_ioctl_id() -> u16 {
+    unsafe { let s = IOCTL_ID; IOCTL_ID = s.wrapping_add(1); s }
+}
+
+/// Build SDPCM header (12 bytes)
+fn build_sdpcm_header(buf: &mut [u8], total_len: usize, channel: u8, seq: u8, data_offset: u8) {
+    let len = total_len as u16;
+    buf[0..2].copy_from_slice(&len.to_le_bytes());
+    buf[2..4].copy_from_slice(&(len ^ 0xFFFF).to_le_bytes()); // Ones' complement checksum
+    buf[4] = seq;
+    buf[5] = channel;
+    buf[6] = 0; // next length (unused)
+    buf[7] = data_offset;
+    buf[8] = 0; // flow control
+    buf[9] = 0; // credit
+    buf[10] = 0;
+    buf[11] = 0;
+}
+
+/// Send an ioctl command and wait for the response
 fn send_ioctl(cmd: u32, data: &[u8], set: bool) -> Result<Vec<u8>, &'static str> {
     if !F2_READY.load(Ordering::Relaxed) {
         return Err("F2 not ready");
     }
 
-    // Build SDPCM + CDC header
-    let total_len = SDPCM_HEADER_LEN + 16 + data.len(); // SDPCM + CDC + payload
-    let mut frame = alloc::vec![0u8; total_len];
+    let ioctl_id = next_ioctl_id();
+    let seq = next_ctl_seq();
 
-    let seq = unsafe {
-        let s = IOCTL_SEQ;
-        IOCTL_SEQ = s.wrapping_add(1);
-        s
-    };
+    // CDC header is 16 bytes, placed after SDPCM header
+    let cdc_len = 16 + data.len();
+    let total_len = SDPCM_HEADER_LEN + cdc_len;
 
-    // SDPCM header (12 bytes)
-    frame[0..2].copy_from_slice(&(total_len as u16).to_le_bytes()); // frame length
-    frame[2..4].copy_from_slice(&(!total_len as u16).to_le_bytes()); // ~frame length
-    frame[4] = seq as u8; // sequence number
-    frame[5] = 0; // channel: control
-    frame[6] = 0; // next length
-    frame[7] = (SDPCM_HEADER_LEN as u8); // data offset
-    frame[8] = 0; // flow control
-    frame[9] = 0; // max seq
-    frame[10] = 0;
-    frame[11] = 0;
+    // Pad to 8-byte alignment (SDIO requirement)
+    let padded_len = (total_len + 7) & !7;
+    let mut frame = alloc::vec![0u8; padded_len];
 
-    // CDC header (16 bytes) at offset SDPCM_HEADER_LEN
-    let cdc_off = SDPCM_HEADER_LEN;
-    frame[cdc_off..cdc_off + 4].copy_from_slice(&cmd.to_le_bytes()); // command
-    frame[cdc_off + 4..cdc_off + 8].copy_from_slice(&(data.len() as u32).to_le_bytes()); // output length
-    let flags: u32 = if set { 0x02 } else { 0x00 } | ((seq as u32) << 16); // SET flag + id
-    frame[cdc_off + 8..cdc_off + 12].copy_from_slice(&flags.to_le_bytes()); // flags
-    frame[cdc_off + 12..cdc_off + 16].copy_from_slice(&0u32.to_le_bytes()); // status
+    // SDPCM header
+    build_sdpcm_header(&mut frame, padded_len, SDPCM_CONTROL_CHANNEL, seq, SDPCM_HEADER_LEN as u8);
+
+    // CDC header (16 bytes)
+    let c = SDPCM_HEADER_LEN;
+    frame[c..c + 4].copy_from_slice(&cmd.to_le_bytes());                   // cmd
+    frame[c + 4..c + 8].copy_from_slice(&(data.len() as u32).to_le_bytes()); // output buf len
+    let flags: u32 = (if set { 0x02u32 } else { 0u32 }) | ((ioctl_id as u32) << 16);
+    frame[c + 8..c + 12].copy_from_slice(&flags.to_le_bytes());            // flags (SET + id)
+    // frame[c+12..c+16] = status (0, filled by firmware on response)
 
     // Payload
     if !data.is_empty() {
-        frame[cdc_off + 16..cdc_off + 16 + data.len()].copy_from_slice(data);
+        frame[c + 16..c + 16 + data.len()].copy_from_slice(data);
     }
 
-    // Send via F2
+    // Send via F2 CMD53
     sdhci::cmd53_write(2, 0, &frame, true)?;
 
-    // Read response (simplified — real driver needs async event loop)
-    let mut resp = alloc::vec![0u8; 512];
-    crate::arch::aarch64::timer::delay_ms(50);
-    let _ = sdhci::cmd53_read(2, 0, &mut resp, true);
+    // Wait for ioctl response (poll F2 for control channel frames)
+    for _ in 0..100 {
+        crate::arch::aarch64::timer::delay_ms(10);
 
-    Ok(resp)
+        if let Some((channel, payload)) = read_sdpcm_frame()? {
+            if channel == SDPCM_CONTROL_CHANNEL && payload.len() >= 16 {
+                // Parse CDC response header
+                let resp_id = u16::from_le_bytes([payload[10], payload[11]]);
+                if resp_id == ioctl_id {
+                    let status = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                    if status != 0 {
+                        crate::kprintln!("  CYW43: ioctl {} failed, status={}", cmd, status);
+                        return Err("ioctl failed");
+                    }
+                    return Ok(payload[16..].to_vec());
+                }
+            }
+            // Got a non-matching frame — could be event, process it
+            if channel == SDPCM_EVENT_CHANNEL {
+                process_event(&payload);
+            }
+        }
+    }
+
+    // Timeout is not fatal for SET ioctls — firmware may not send a response
+    Ok(Vec::new())
+}
+
+/// Read one SDPCM frame from F2. Returns (channel, payload) or None.
+fn read_sdpcm_frame() -> Result<Option<(u8, Vec<u8>)>, &'static str> {
+    // Check if F2 has data pending
+    let f2_status = sdhci::cmd52_read(0, 0x04).unwrap_or(0);
+    if f2_status & 0x04 == 0 {
+        return Ok(None); // No F2 data
+    }
+
+    let mut raw = [0u8; 2048];
+    sdhci::cmd53_read(2, 0, &mut raw, true)?;
+
+    // Parse SDPCM header
+    let frame_len = u16::from_le_bytes([raw[0], raw[1]]) as usize;
+    let check = u16::from_le_bytes([raw[2], raw[3]]);
+
+    // Verify ones' complement checksum
+    if (frame_len as u16) ^ check != 0xFFFF {
+        return Ok(None); // Corrupt frame
+    }
+
+    if frame_len < SDPCM_HEADER_LEN || frame_len > raw.len() {
+        return Ok(None);
+    }
+
+    let channel = raw[5];
+    let data_offset = raw[7] as usize;
+
+    if data_offset >= frame_len {
+        return Ok(None);
+    }
+
+    let payload = raw[data_offset..frame_len].to_vec();
+    Ok(Some((channel, payload)))
+}
+
+/// Process a firmware event (from event channel)
+fn process_event(payload: &[u8]) {
+    // BDC header (4 bytes) + bcm_event header
+    if payload.len() < BDC_HEADER_LEN + 72 {
+        return; // Too short for event
+    }
+
+    let bdc_data_offset = (payload[3] as usize) * 4; // BDC data offset in 32-bit words
+    let event_start = BDC_HEADER_LEN + bdc_data_offset;
+
+    if event_start + 48 > payload.len() { return; }
+
+    // bcm_event: skip Ethernet header (14) + bcm_event header (10)
+    // Event type is at offset 24+4=28 from event_start (after eth+bcmeth headers)
+    // Simplified: look for event_type at a known offset
+    let evt_off = event_start + 24; // Past ether_header + bcm_msg
+    if evt_off + 4 > payload.len() { return; }
+
+    let event_type = u32::from_be_bytes([
+        payload[evt_off], payload[evt_off + 1],
+        payload[evt_off + 2], payload[evt_off + 3],
+    ]);
+
+    let status = if evt_off + 12 <= payload.len() {
+        u32::from_be_bytes([
+            payload[evt_off + 8], payload[evt_off + 9],
+            payload[evt_off + 10], payload[evt_off + 11],
+        ])
+    } else { 0 };
+
+    match event_type {
+        WLC_E_LINK => {
+            if status == 0 {
+                crate::kprintln!("  CYW43: EVENT link up");
+                set_state(WiFiState::Connected);
+            } else {
+                crate::kprintln!("  CYW43: EVENT link down (status={})", status);
+                set_state(WiFiState::Ready);
+            }
+        }
+        WLC_E_AUTH => {
+            crate::kprintln!("  CYW43: EVENT auth (status={})", status);
+        }
+        WLC_E_PSK_SUP => {
+            crate::kprintln!("  CYW43: EVENT WPA handshake (status={})", status);
+        }
+        _ => {
+            // Ignore unknown events silently
+        }
+    }
 }
 
 // === Public WiFi API ===
@@ -388,7 +530,7 @@ pub fn init(firmware: &[u8], nvram: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Connect to a WiFi network
+/// Connect to a WiFi network (WPA2-AES PSK)
 pub fn join(ssid: &str, password: &str) -> Result<(), &'static str> {
     if state() != WiFiState::Ready && state() != WiFiState::Connected {
         return Err("WiFi not ready");
@@ -397,59 +539,59 @@ pub fn join(ssid: &str, password: &str) -> Result<(), &'static str> {
     set_state(WiFiState::Connecting);
     crate::kprintln!("  CYW43: connecting to '{}'...", ssid);
 
-    // Set infrastructure mode (1 = STA)
-    let infra = 1u32.to_le_bytes();
-    send_ioctl(WLC_SET_INFRA, &infra, true)?;
+    // Step 1: Set infrastructure mode (1 = STA, not AP)
+    send_ioctl(WLC_SET_INFRA, &1u32.to_le_bytes(), true)?;
 
-    // Set auth mode (0 = open)
-    let auth = 0u32.to_le_bytes();
-    send_ioctl(WLC_SET_AUTH, &auth, true)?;
+    // Step 2: Set auth type (0 = open system, WPA2 handled by wsec)
+    send_ioctl(WLC_SET_AUTH, &0u32.to_le_bytes(), true)?;
 
-    // Set security: WPA2-AES
-    let wsec = WSEC_AES.to_le_bytes();
-    send_ioctl(WLC_SET_WSEC, &wsec, true)?;
+    // Step 3: Set cipher suite (WSEC_AES = CCMP for WPA2)
+    send_ioctl(WLC_SET_WSEC, &WSEC_AES.to_le_bytes(), true)?;
 
-    // Set WPA auth: WPA2-PSK
-    let wpa_auth = WPA2_AUTH_PSK.to_le_bytes();
-    send_ioctl(WLC_SET_WPA_AUTH, &wpa_auth, true)?;
+    // Step 4: Set WPA auth mode (WPA2-PSK = 0x80)
+    send_ioctl(WLC_SET_WPA_AUTH, &WPA2_AUTH_PSK.to_le_bytes(), true)?;
 
-    // Set passphrase via WLC_SET_KEY ioctl
-    // wsec_pmk_t structure: key_len(u16) + flags(u16) + key(64 bytes)
+    // Step 5: Set passphrase via WLC_SET_WSEC_PMK (ioctl 268)
+    // wsec_pmk_t: key_len(u16) + flags(u16) + key[64]
     let mut pmk = [0u8; 68];
     let pw_bytes = password.as_bytes();
     let pw_len = pw_bytes.len().min(63);
     pmk[0..2].copy_from_slice(&(pw_len as u16).to_le_bytes());
     pmk[2..4].copy_from_slice(&1u16.to_le_bytes()); // WSEC_PASSPHRASE flag
     pmk[4..4 + pw_len].copy_from_slice(&pw_bytes[..pw_len]);
-    send_ioctl(WLC_SET_KEY, &pmk, true)?;
+    send_ioctl(WLC_SET_WSEC_PMK, &pmk, true)?;
 
-    // Join the network: WLC_SET_SSID
-    // wlc_ssid_t: ssid_len(u32) + ssid(32 bytes)
+    // Step 6: Trigger join — WLC_SET_SSID (ioctl 26)
+    // wlc_ssid_t: ssid_len(u32) + ssid[32]
     let mut ssid_buf = [0u8; 36];
     let ssid_bytes = ssid.as_bytes();
     let ssid_len = ssid_bytes.len().min(32);
     ssid_buf[0..4].copy_from_slice(&(ssid_len as u32).to_le_bytes());
     ssid_buf[4..4 + ssid_len].copy_from_slice(&ssid_bytes[..ssid_len]);
-    send_ioctl(WLC_SET_SSID_JOIN, &ssid_buf, true)?;
+    send_ioctl(WLC_SET_SSID, &ssid_buf, true)?;
 
-    // Wait for association (simplified — real driver monitors events)
-    for i in 0..100 {
+    // Step 7: Wait for LINK event (firmware handles WPA2 4-way handshake)
+    crate::kprintln!("  CYW43: waiting for association + WPA2 handshake...");
+    for i in 0..150 {
         crate::arch::aarch64::timer::delay_ms(100);
-        // Check F2 for association event
-        let mut event_buf = [0u8; 512];
-        if sdhci::cmd53_read(2, 0, &mut event_buf, true).is_ok() {
-            // Check if we got an association response
-            // (simplified — full driver parses SDPCM + BDC event headers)
-            if event_buf[0] != 0 && event_buf[1] != 0 {
-                crate::kprintln!("  CYW43: associated after {}ms", (i + 1) * 100);
-                set_state(WiFiState::Connected);
-                return Ok(());
+
+        // Poll for events
+        if let Ok(Some((channel, payload))) = read_sdpcm_frame() {
+            if channel == SDPCM_EVENT_CHANNEL {
+                process_event(&payload);
             }
+        }
+
+        // Check if process_event() set us to Connected
+        if state() == WiFiState::Connected {
+            crate::kprintln!("  CYW43: connected to '{}' ({}ms)", ssid, (i + 1) * 100);
+            return Ok(());
         }
     }
 
     set_state(WiFiState::Error);
-    Err("association timeout")
+    crate::kprintln!("  CYW43: association timeout after 15s");
+    Err("WiFi association timeout")
 }
 
 /// Disconnect from WiFi
@@ -463,66 +605,74 @@ pub fn disconnect() -> Result<(), &'static str> {
 pub fn send_frame(data: &[u8]) -> Result<(), &'static str> {
     if !F2_READY.load(Ordering::Relaxed) { return Err("F2 not ready"); }
 
-    // Build SDPCM data frame
-    let total_len = SDPCM_HEADER_LEN + 2 + data.len(); // +2 for BDC header
-    let mut frame = alloc::vec![0u8; total_len];
+    let seq = next_data_seq();
 
-    let seq = unsafe {
-        let s = IOCTL_SEQ;
-        IOCTL_SEQ = s.wrapping_add(1);
-        s
-    };
+    // SDPCM + BDC + Ethernet payload
+    let data_offset = SDPCM_HEADER_LEN + BDC_HEADER_LEN;
+    let total_len = data_offset + data.len();
+    let padded_len = (total_len + 7) & !7; // 8-byte align for SDIO
+    let mut frame = alloc::vec![0u8; padded_len];
 
     // SDPCM header
-    frame[0..2].copy_from_slice(&(total_len as u16).to_le_bytes());
-    frame[2..4].copy_from_slice(&(!total_len as u16).to_le_bytes());
-    frame[4] = seq as u8;
-    frame[5] = 2; // channel: data
-    frame[6] = 0;
-    frame[7] = (SDPCM_HEADER_LEN + 2) as u8; // data offset (skip BDC)
+    build_sdpcm_header(&mut frame, padded_len, SDPCM_DATA_CHANNEL, seq, data_offset as u8);
 
-    // BDC header (2 bytes)
-    frame[SDPCM_HEADER_LEN] = 0; // flags
-    frame[SDPCM_HEADER_LEN + 1] = 0; // priority
+    // BDC header (4 bytes): version=2, no flags, priority=0
+    frame[SDPCM_HEADER_LEN] = 0x20; // BDC version 2
+    frame[SDPCM_HEADER_LEN + 1] = 0; // flags
+    frame[SDPCM_HEADER_LEN + 2] = 0; // priority
+    frame[SDPCM_HEADER_LEN + 3] = 0; // data offset (0 extra 32-bit words)
 
-    // Ethernet frame payload
-    frame[SDPCM_HEADER_LEN + 2..].copy_from_slice(data);
+    // Ethernet frame
+    frame[data_offset..data_offset + data.len()].copy_from_slice(data);
 
     sdhci::cmd53_write(2, 0, &frame, true)?;
     Ok(())
 }
 
 /// Receive an Ethernet frame from WiFi (called by smoltcp RX path)
-/// Returns the frame data or None if no frame available
+/// Returns the frame data length or None if no frame available
 pub fn recv_frame(buf: &mut [u8]) -> Option<usize> {
     if !F2_READY.load(Ordering::Relaxed) { return None; }
 
-    // Check if data is available on F2
-    let status = sdhci::cmd52_read(0, 0x04).ok()?; // Read interrupt status
-    if status & 0x04 == 0 { return None; } // No F2 interrupt
+    let (channel, payload) = match read_sdpcm_frame() {
+        Ok(Some(frame)) => frame,
+        _ => return None,
+    };
 
-    // Read frame from F2
-    let mut raw = [0u8; 2048];
-    let _ = sdhci::cmd53_read(2, 0, &mut raw, true).ok()?;
+    match channel {
+        SDPCM_DATA_CHANNEL => {
+            // Data frame — strip BDC header, extract Ethernet payload
+            if payload.len() < BDC_HEADER_LEN { return None; }
+            let bdc_data_offset = (payload[3] as usize) * 4; // Extra words
+            let eth_start = BDC_HEADER_LEN + bdc_data_offset;
+            if eth_start >= payload.len() { return None; }
 
-    // Parse SDPCM header
-    let frame_len = u16::from_le_bytes([raw[0], raw[1]]) as usize;
-    if frame_len < SDPCM_HEADER_LEN + 2 || frame_len > raw.len() {
-        return None;
+            let eth_data = &payload[eth_start..];
+            let copy_len = eth_data.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&eth_data[..copy_len]);
+            Some(copy_len)
+        }
+        SDPCM_EVENT_CHANNEL => {
+            // Event frame — process it, return no data to smoltcp
+            process_event(&payload);
+            None
+        }
+        _ => None,
     }
+}
 
-    let channel = raw[5];
-    let data_offset = raw[7] as usize;
+/// Poll for and process pending events (call from main loop)
+pub fn poll_events() {
+    if !F2_READY.load(Ordering::Relaxed) { return; }
 
-    if channel != 2 { return None; } // Not a data frame
-    if data_offset >= frame_len { return None; }
-
-    // Extract Ethernet frame (skip SDPCM + BDC headers)
-    let eth_data = &raw[data_offset..frame_len];
-    let copy_len = eth_data.len().min(buf.len());
-    buf[..copy_len].copy_from_slice(&eth_data[..copy_len]);
-
-    Some(copy_len)
+    // Drain all pending frames, process events
+    for _ in 0..10 {
+        match read_sdpcm_frame() {
+            Ok(Some((SDPCM_EVENT_CHANNEL, payload))) => process_event(&payload),
+            Ok(Some(_)) => {} // Data frame — ignore (smoltcp will pick it up)
+            _ => break,       // No more frames
+        }
+    }
 }
 
 /// Get WiFi MAC address from the chip

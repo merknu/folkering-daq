@@ -115,8 +115,9 @@ static mut HOTSWAP_RX_BUF: [u8; 262144] = [0; 262144]; // 256 KiB (full WASM bin
 static mut HOTSWAP_TX_BUF: [u8; 256] = [0; 256];         // Small response buffer
 
 // Socket set storage
-static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 6] =
-    [smoltcp::iface::SocketStorage::EMPTY; 6];
+// 7 slots: openDAQ + hotswap + mDNS + shell + DHCP + 2 spare
+static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 7] =
+    [smoltcp::iface::SocketStorage::EMPTY; 7];
 static mut SOCKETS: Option<SocketSet<'static>> = None;
 
 // WebSocket handshake state
@@ -200,6 +201,136 @@ pub fn init() {
     crate::kprintln!("  NET: stack ready, TCP :7420 (openDAQ) + :7421 (hotswap) + :2222 (shell) + UDP :5353");
 }
 
+// DHCP socket buffers
+static mut DHCP_RX_META: [udp::PacketMetadata; 4] = [udp::PacketMetadata::EMPTY; 4];
+static mut DHCP_TX_META: [udp::PacketMetadata; 4] = [udp::PacketMetadata::EMPTY; 4];
+static mut DHCP_RX_BUF: [u8; 1024] = [0; 1024];
+static mut DHCP_TX_BUF: [u8; 1024] = [0; 1024];
+static mut DHCP_HANDLE: Option<SocketHandle> = None;
+static mut USE_DHCP: bool = false;
+
+/// Initialize network stack over WiFi with DHCP
+///
+/// Call this AFTER cyw43::init() + cyw43::join() have connected to WiFi.
+/// Sets up smoltcp with the WiFi device and a DHCP client for IP allocation.
+#[cfg(feature = "wifi")]
+pub fn init_wifi() {
+    let mac = match crate::drivers::cyw43::mac_address() {
+        Ok(m) => m,
+        Err(_) => {
+            crate::kprintln!("  NET/WiFi: could not read MAC address");
+            return;
+        }
+    };
+
+    let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
+
+    crate::kprintln!("  NET/WiFi: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    unsafe {
+        // Create smoltcp Interface with WiFi device
+        let mut config = Config::new(hw_addr);
+        config.random_seed = crate::arch::aarch64::counter_value();
+
+        // WiFi uses a static WiFiDevice (no GemDevice)
+        static mut WIFI_DEV: Option<wifi::WiFiDevice> = None;
+        WIFI_DEV = Some(wifi::WiFiDevice);
+
+        let wifi_dev = WIFI_DEV.as_mut().unwrap();
+        let iface = Interface::new(config, wifi_dev, now());
+
+        // Create socket set
+        let mut sockets = SocketSet::new(&mut SOCKET_SET_BUF[..]);
+
+        // DHCP client socket (gets IP from router)
+        let dhcp_socket = dhcpv4::Socket::new();
+        let dhcp_h = sockets.add(dhcp_socket);
+        DHCP_HANDLE = Some(dhcp_h);
+        USE_DHCP = true;
+
+        // TCP socket for openDAQ (port 7420)
+        let tcp_rx = tcp::SocketBuffer::new(&mut TCP_RX_BUF[..]);
+        let tcp_tx = tcp::SocketBuffer::new(&mut TCP_TX_BUF[..]);
+        let tcp_socket = tcp::Socket::new(tcp_rx, tcp_tx);
+        let tcp_h = sockets.add(tcp_socket);
+        TCP_HANDLE = Some(tcp_h);
+
+        // TCP socket for WASM hot-swap (port 7421)
+        let hs_rx = tcp::SocketBuffer::new(&mut HOTSWAP_RX_BUF[..]);
+        let hs_tx = tcp::SocketBuffer::new(&mut HOTSWAP_TX_BUF[..]);
+        let hs_socket = tcp::Socket::new(hs_rx, hs_tx);
+        let hs_h = sockets.add(hs_socket);
+        TCP_HOTSWAP_HANDLE = Some(hs_h);
+
+        // UDP socket for mDNS (port 5353)
+        let udp_rx = udp::PacketBuffer::new(&mut UDP_RX_META[..], &mut UDP_RX_BUF[..]);
+        let udp_tx = udp::PacketBuffer::new(&mut UDP_TX_META[..], &mut UDP_TX_BUF[..]);
+        let mut udp_socket = udp::Socket::new(udp_rx, udp_tx);
+        udp_socket.bind(5353).unwrap();
+        let udp_h = sockets.add(udp_socket);
+        UDP_HANDLE = Some(udp_h);
+
+        IFACE = Some(iface);
+        SOCKETS = Some(sockets);
+
+        // TCP shell
+        tcp_shell::init(SOCKETS.as_mut().unwrap());
+    }
+
+    NET_READY.store(true, Ordering::SeqCst);
+    crate::kprintln!("  NET/WiFi: stack ready (DHCP pending), ports :7420 :7421 :2222 :5353");
+}
+
+/// Handle DHCP events (called from poll)
+unsafe fn handle_dhcp() {
+    if !USE_DHCP { return; }
+    let dhcp_h = match DHCP_HANDLE { Some(h) => h, None => return };
+    let sockets = SOCKETS.as_mut().unwrap();
+    let iface = IFACE.as_mut().unwrap();
+
+    let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_h).poll();
+    match event {
+        Some(dhcpv4::Event::Configured(config)) => {
+            let ip = config.address;
+            crate::kprintln!("[OK] DHCP: got IP {}", ip);
+            iface.update_ip_addrs(|addrs| {
+                addrs.clear();
+                let _ = addrs.push(IpCidr::Ipv4(ip));
+            });
+
+            // Store IP for mDNS responses
+            if let IpAddress::Ipv4(v4) = IpAddress::from(ip.address()) {
+                OUR_IP = v4.octets();
+            }
+
+            // Set default gateway
+            if let Some(router) = config.router {
+                iface.routes_mut().add_default_ipv4_route(router).ok();
+                crate::kprintln!("  DHCP: gateway {}", router);
+            }
+
+            // Now start listening on TCP ports (can't bind before having an IP)
+            let tcp_h = TCP_HANDLE.unwrap();
+            let socket = sockets.get_mut::<tcp::Socket>(tcp_h);
+            if !socket.is_active() {
+                let _ = socket.listen(7420);
+            }
+
+            let hs_h = TCP_HOTSWAP_HANDLE.unwrap();
+            let socket = sockets.get_mut::<tcp::Socket>(hs_h);
+            if !socket.is_active() {
+                let _ = socket.listen(hotswap::HOTSWAP_PORT);
+            }
+        }
+        Some(dhcpv4::Event::Deconfigured) => {
+            crate::kprintln!("  DHCP: lease expired, reconfiguring...");
+            iface.update_ip_addrs(|addrs| { addrs.clear(); });
+        }
+        None => {}
+    }
+}
+
 /// Poll network — call from main loop
 pub fn poll() {
     if !NET_READY.load(Ordering::Relaxed) { return; }
@@ -211,6 +342,13 @@ pub fn poll() {
 
         // Drive the smoltcp state machine
         let _ = iface.poll(now(), device, sockets);
+
+        // Poll WiFi events (process association/disconnection events)
+        #[cfg(feature = "wifi")]
+        crate::drivers::cyw43::poll_events();
+
+        // Handle DHCP lease management
+        handle_dhcp();
 
         // Handle mDNS queries
         handle_mdns(sockets);

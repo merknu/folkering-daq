@@ -140,25 +140,44 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
                 Ok(()) => {
                     kprintln!("[OK] SDHCI WiFi (CYW43455 via SDIO)");
 
-                    // Load embedded firmware and connect
                     static CYW43_FW: &[u8] = include_bytes!("../../firmware/cyw43455_fw.bin");
                     static CYW43_NVRAM: &[u8] = include_bytes!("../../firmware/cyw43455_nvram.txt");
 
                     match drivers::cyw43::init(CYW43_FW, CYW43_NVRAM) {
                         Ok(()) => {
-                            // TODO: Read SSID/password from config or NVRAM
-                            // For now, attempt connection with compiled-in credentials
-                            kprintln!("[OK] CYW43455 firmware loaded");
+                            kprintln!("[OK] CYW43455 firmware loaded, joining WiFi...");
+                            // TODO: Read from config partition instead of hardcoding
+                            match drivers::cyw43::join("AlfaNet", "AlfaBox@2890") {
+                                Ok(()) => {
+                                    kprintln!("[OK] WiFi connected to AlfaNet");
+                                    // Initialize smoltcp over WiFi with DHCP
+                                    net::init_wifi();
+                                }
+                                Err(e) => {
+                                    kprintln!("[WARN] WiFi join failed: {}", e);
+                                    kprintln!("  Falling back to Ethernet...");
+                                    net::init(); // Fall back to GEM Ethernet
+                                }
+                            }
                         }
-                        Err(e) => kprintln!("[WARN] CYW43455 init failed: {}", e),
+                        Err(e) => {
+                            kprintln!("[WARN] CYW43455 init failed: {}", e);
+                            net::init(); // Fall back to Ethernet
+                        }
                     }
                 }
-                Err(e) => kprintln!("[WARN] SDHCI init failed: {}", e),
+                Err(e) => {
+                    kprintln!("[WARN] SDHCI init failed: {}", e);
+                    net::init(); // Fall back to Ethernet
+                }
             }
         }
 
         #[cfg(not(feature = "wifi"))]
-        kprintln!("  WiFi: disabled (enable with --features wifi)");
+        {
+            net::init(); // Ethernet only
+            kprintln!("  WiFi: disabled (enable with --features wifi)");
+        }
 
         drivers::xhci::init();
         kprintln!("[OK] xHCI USB controller");
@@ -166,8 +185,7 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
         usb::sirius::init();
         kprintln!("[OK] SIRIUSi-HS DAQ instrument");
 
-        net::init();
-        kprintln!("[OK] Cadence GEM Ethernet + smoltcp");
+        // Network init is handled above: WiFi+DHCP or Ethernet fallback
     }
 
     #[cfg(feature = "qemu-virt")]

@@ -3,38 +3,42 @@
 //! Supports both aarch64 (TTBR1_EL1, 4-level, 4KB granule) and
 //! x86_64 (CR3, 4-level, 4KB pages).
 //!
-//! Limine sets up the initial page tables with HHDM (Higher Half Direct Map),
-//! so all physical memory is identity-mapped at `phys + hhdm_offset`.
-//! We walk these existing tables to find the PTE for a given virtual address
-//! and flip permission bits.
+//! Limine sets up initial page tables with HHDM (Higher Half Direct Map).
+//! All physical memory is accessible at `phys + hhdm_offset`.
+//!
+//! Key feature: Block Descriptor Splitting
+//! If Limine mapped memory as 2MB or 1GB blocks, we split them into
+//! individual 4KB PTEs on demand to enable per-page W^X control.
 
 use super::jit::MemoryPermission;
+use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 4096;
+const ENTRIES_PER_TABLE: usize = 512;
 
-// === AArch64 Page Table Definitions ===
+// ── AArch64 Page Table Definitions ──────────────────────────────
 
 #[cfg(target_arch = "aarch64")]
 mod arch {
-    /// AArch64 4KB granule, 4-level translation (L0-L3)
-    /// VA[47:39] = L0 index, VA[38:30] = L1, VA[29:21] = L2, VA[20:12] = L3
-    const VA_BITS: usize = 48;
-    const ENTRIES_PER_TABLE: usize = 512;
-
-    /// PTE bit definitions for AArch64 (stage 1, EL1)
     pub const PTE_VALID: u64        = 1 << 0;
     pub const PTE_TABLE: u64        = 1 << 1;  // Table descriptor (vs block)
     pub const PTE_AF: u64           = 1 << 10; // Access Flag
+    pub const PTE_SH_INNER: u64     = 3 << 8;  // Inner Shareable
     pub const PTE_PXN: u64          = 1 << 53; // Privileged eXecute Never
     pub const PTE_UXN: u64          = 1 << 54; // Unprivileged eXecute Never
-    pub const PTE_AP_RW_EL1: u64    = 0b00 << 6; // AP[2:1] = RW at EL1
-    pub const PTE_AP_RO_EL1: u64    = 0b10 << 6; // AP[2:1] = RO at EL1
+    pub const PTE_AP_RW_EL1: u64    = 0b00 << 6;
+    pub const PTE_AP_RO_EL1: u64    = 0b10 << 6;
     pub const PTE_AP_MASK: u64      = 0b11 << 6;
 
-    /// Physical address mask (bits [47:12] for 4KB granule)
+    /// Attribute bits to preserve when splitting blocks (AttrIndx + SH + AF + AP + UXN + PXN)
+    pub const ATTR_MASK: u64 = 0x0060_0000_0000_0FFC | PTE_PXN | PTE_UXN;
+
     pub const PHYS_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
-    /// Read TTBR1_EL1 (kernel page table base for higher-half addresses)
+    /// Block address masks per level
+    pub const L1_BLOCK_MASK: u64 = 0x0000_FFFF_C000_0000; // 1GB aligned
+    pub const L2_BLOCK_MASK: u64 = 0x0000_FFFF_FFE0_0000; // 2MB aligned
+
     #[inline]
     pub fn read_ttbr1() -> u64 {
         let val: u64;
@@ -42,7 +46,6 @@ mod arch {
         val & PHYS_ADDR_MASK
     }
 
-    /// Read TTBR0_EL1 (page table base for lower-half addresses)
     #[inline]
     pub fn read_ttbr0() -> u64 {
         let val: u64;
@@ -50,7 +53,6 @@ mod arch {
         val & PHYS_ADDR_MASK
     }
 
-    /// TLB invalidation for a single page (TLBI VAE1IS)
     #[inline]
     pub unsafe fn tlbi_page(vaddr: u64) {
         let page = vaddr >> 12;
@@ -63,42 +65,46 @@ mod arch {
         );
     }
 
-    /// Extract page table index at a given level (0-3) from virtual address
+    /// Invalidate ALL TLB entries (used after block splitting)
+    #[inline]
+    pub unsafe fn tlbi_all() {
+        core::arch::asm!(
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nomem, nostack)
+        );
+    }
+
     #[inline]
     pub fn table_index(vaddr: u64, level: usize) -> usize {
-        let shift = 12 + (3 - level) * 9; // L0: 39, L1: 30, L2: 21, L3: 12
+        let shift = 12 + (3 - level) * 9;
         ((vaddr >> shift) & 0x1FF) as usize
     }
 
-    /// Determine which TTBR to use based on virtual address
     #[inline]
     pub fn page_table_base(vaddr: u64) -> u64 {
-        if vaddr >= (1u64 << 48) - (1u64 << 47) {
-            // Higher half → TTBR1
+        // Bit 55 determines TTBR: set = TTBR1 (kernel), clear = TTBR0 (user)
+        if vaddr & (1u64 << 55) != 0 {
             read_ttbr1()
         } else {
-            // Lower half → TTBR0
             read_ttbr0()
         }
     }
 }
 
-// === x86_64 Page Table Definitions ===
+// ── x86_64 Page Table Definitions ───────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
 mod arch {
-    /// x86_64 4-level paging: PML4 → PDPT → PD → PT
-    /// VA[47:39] = PML4 index, VA[38:30] = PDPT, VA[29:21] = PD, VA[20:12] = PT
-
-    /// PTE bit definitions for x86_64
     pub const PTE_PRESENT: u64  = 1 << 0;
     pub const PTE_WRITABLE: u64 = 1 << 1;
-    pub const PTE_NX: u64       = 1 << 63; // No-Execute
+    pub const PTE_PS: u64       = 1 << 7;  // Page Size (1 = huge page at this level)
+    pub const PTE_NX: u64       = 1 << 63;
 
-    /// Physical address mask (bits [51:12])
+    pub const ATTR_MASK: u64 = 0xFFF0_0000_0000_0FFF; // All attribute bits
     pub const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-    /// Read CR3 (page table root)
     #[inline]
     pub fn read_cr3() -> u64 {
         let val: u64;
@@ -106,68 +112,213 @@ mod arch {
         val & PHYS_ADDR_MASK
     }
 
-    /// TLB invalidation for a single page (INVLPG)
     #[inline]
     pub unsafe fn tlbi_page(vaddr: u64) {
         core::arch::asm!("invlpg [{}]", in(reg) vaddr, options(nomem, nostack));
     }
 
-    /// Extract page table index at a given level (0-3) from virtual address
+    #[inline]
+    pub unsafe fn tlbi_all() {
+        // Flush entire TLB by reloading CR3
+        let cr3: u64;
+        core::arch::asm!("mov {0}, cr3", out(reg) cr3, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {0}", in(reg) cr3, options(nomem, nostack));
+    }
+
     #[inline]
     pub fn table_index(vaddr: u64, level: usize) -> usize {
-        let shift = 12 + (3 - level) * 9; // L0(PML4): 39, L1(PDPT): 30, L2(PD): 21, L3(PT): 12
+        let shift = 12 + (3 - level) * 9;
         ((vaddr >> shift) & 0x1FF) as usize
     }
 
-    /// Page table base is always CR3
     #[inline]
     pub fn page_table_base(_vaddr: u64) -> u64 {
         read_cr3()
     }
 }
 
-// === Architecture-Independent Page Table Walker ===
+// ── Block Descriptor Splitting ──────────────────────────────────
 
-/// Walk the 4-level page table to find the PTE for a given virtual address.
-/// Returns a mutable pointer to the PTE entry.
+/// Allocate a zeroed 4KB page for a new page table.
+/// Returns the PHYSICAL address of the new table.
+unsafe fn alloc_page_table() -> Option<u64> {
+    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).ok()?;
+    let ptr = alloc::alloc::alloc_zeroed(layout);
+    if ptr.is_null() { return None; }
+
+    // Convert virtual (HHDM) address to physical
+    let phys = crate::virt_to_phys(ptr as u64);
+    Some(phys)
+}
+
+/// Split a block descriptor into a table of sub-entries.
 ///
-/// # Safety
-/// - Requires HHDM to be set up (all physical memory accessible via phys + hhdm_offset)
-/// - Must be called with interrupts disabled or from a context where TLB flush is safe
+/// On aarch64:
+///   L1 block (1GB) → L2 table with 512 × 2MB block entries
+///   L2 block (2MB) → L3 table with 512 × 4KB page entries
+///
+/// On x86_64:
+///   L1 (PDPT) huge (1GB) → L2 table with 512 × 2MB entries
+///   L2 (PD) huge (2MB)   → L3 table with 512 × 4KB entries
+#[cfg(target_arch = "aarch64")]
+unsafe fn split_block(entry_ptr: *mut u64, level: usize) -> bool {
+    let block_entry = core::ptr::read_volatile(entry_ptr);
+
+    // Must be a valid block (not already a table)
+    if block_entry & arch::PTE_VALID == 0 { return false; }
+    if block_entry & arch::PTE_TABLE != 0 { return true; } // Already a table
+
+    // Allocate new page table
+    let new_table_phys = match alloc_page_table() {
+        Some(p) => p,
+        None => {
+            crate::kprintln!("  PTE: failed to allocate page table for block split");
+            return false;
+        }
+    };
+
+    let hhdm = crate::hhdm_offset();
+    let new_table_virt = (new_table_phys + hhdm) as *mut u64;
+
+    // Extract physical base and attributes from block descriptor
+    let attrs = block_entry & arch::ATTR_MASK;
+
+    match level {
+        1 => {
+            // L1 block = 1GB → split into 512 × 2MB L2 block entries
+            let block_base = block_entry & arch::L1_BLOCK_MASK;
+            for i in 0..ENTRIES_PER_TABLE {
+                let sub_phys = block_base + (i as u64) * (2 * 1024 * 1024); // 2MB each
+                // L2 block entry: valid + block (NOT table) + attributes
+                let sub_entry = sub_phys | attrs | arch::PTE_VALID | arch::PTE_AF;
+                // Note: PTE_TABLE bit is NOT set → these are block entries
+                core::ptr::write_volatile(new_table_virt.add(i), sub_entry);
+            }
+        }
+        2 => {
+            // L2 block = 2MB → split into 512 × 4KB L3 page entries
+            let block_base = block_entry & arch::L2_BLOCK_MASK;
+            for i in 0..ENTRIES_PER_TABLE {
+                let sub_phys = block_base + (i as u64) * PAGE_SIZE as u64;
+                // L3 page entry: valid + table bit (at L3, bit 1 means "page" not "block")
+                let sub_entry = sub_phys | attrs | arch::PTE_VALID | arch::PTE_TABLE | arch::PTE_AF;
+                core::ptr::write_volatile(new_table_virt.add(i), sub_entry);
+            }
+        }
+        _ => return false,
+    }
+
+    // Replace the block entry with a table descriptor pointing to new table
+    let table_desc = new_table_phys | arch::PTE_VALID | arch::PTE_TABLE;
+    core::ptr::write_volatile(entry_ptr, table_desc);
+
+    // Invalidate entire TLB (block split affects many addresses)
+    arch::tlbi_all();
+
+    crate::kprintln!("  PTE: split L{} block at {:#x} → table at {:#x}",
+        level, block_entry & arch::PHYS_ADDR_MASK, new_table_phys);
+
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn split_block(entry_ptr: *mut u64, level: usize) -> bool {
+    let block_entry = core::ptr::read_volatile(entry_ptr);
+
+    if block_entry & arch::PTE_PRESENT == 0 { return false; }
+    if block_entry & arch::PTE_PS == 0 { return true; } // Already 4KB, not huge
+
+    let new_table_phys = match alloc_page_table() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let hhdm = crate::hhdm_offset();
+    let new_table_virt = (new_table_phys + hhdm) as *mut u64;
+
+    let attrs = block_entry & arch::ATTR_MASK & !arch::PTE_PS; // Remove PS bit
+
+    match level {
+        1 => {
+            // 1GB huge → 512 × 2MB huge entries
+            let block_base = block_entry & 0x000F_FFFF_C000_0000;
+            for i in 0..ENTRIES_PER_TABLE {
+                let sub_phys = block_base + (i as u64) * (2 * 1024 * 1024);
+                let sub_entry = sub_phys | attrs | arch::PTE_PRESENT | arch::PTE_PS;
+                core::ptr::write_volatile(new_table_virt.add(i), sub_entry);
+            }
+        }
+        2 => {
+            // 2MB huge → 512 × 4KB regular entries
+            let block_base = block_entry & 0x000F_FFFF_FFE0_0000;
+            for i in 0..ENTRIES_PER_TABLE {
+                let sub_phys = block_base + (i as u64) * PAGE_SIZE as u64;
+                let sub_entry = sub_phys | attrs | arch::PTE_PRESENT;
+                core::ptr::write_volatile(new_table_virt.add(i), sub_entry);
+            }
+        }
+        _ => return false,
+    }
+
+    // Replace with table entry (remove PS bit, point to new table)
+    let table_desc = new_table_phys | (block_entry & 0xFFF & !arch::PTE_PS) | arch::PTE_PRESENT;
+    core::ptr::write_volatile(entry_ptr, table_desc);
+
+    arch::tlbi_all();
+    true
+}
+
+// ── Page Table Walker ───────────────────────────────────────────
+
+/// Walk the 4-level page table to find the L3 PTE for a virtual address.
+/// Splits block descriptors on demand if encountered.
 unsafe fn walk_page_table(vaddr: u64) -> Option<*mut u64> {
     let hhdm = crate::hhdm_offset();
     let mut table_phys = arch::page_table_base(vaddr);
 
-    // Walk levels 0-2 (each level points to next table)
     for level in 0..3 {
         let index = arch::table_index(vaddr, level);
         let entry_ptr = ((table_phys + hhdm) as *mut u64).add(index);
         let entry = core::ptr::read_volatile(entry_ptr);
 
-        // Check if entry is valid/present
+        // Check valid/present
         #[cfg(target_arch = "aarch64")]
         if entry & arch::PTE_VALID == 0 { return None; }
         #[cfg(target_arch = "x86_64")]
         if entry & arch::PTE_PRESENT == 0 { return None; }
 
-        // Extract physical address of next table
+        // Check for block/huge page descriptor
         #[cfg(target_arch = "aarch64")]
         {
-            // Check if it's a table descriptor (not a block mapping)
             if entry & arch::PTE_TABLE == 0 {
-                // Block mapping at level 1 or 2 — can't modify individual page permissions
-                // Would need to split the block into a table first
-                return None;
+                // Block descriptor — split it into a table
+                if !split_block(entry_ptr, level) {
+                    return None;
+                }
+                // Re-read the entry (now a table descriptor)
+                let entry = core::ptr::read_volatile(entry_ptr);
+                table_phys = entry & arch::PHYS_ADDR_MASK;
+                continue;
             }
             table_phys = entry & arch::PHYS_ADDR_MASK;
         }
+
         #[cfg(target_arch = "x86_64")]
         {
+            if entry & arch::PTE_PS != 0 {
+                // Huge page — split it
+                if !split_block(entry_ptr, level) {
+                    return None;
+                }
+                let entry = core::ptr::read_volatile(entry_ptr);
+                table_phys = entry & arch::PHYS_ADDR_MASK;
+                continue;
+            }
             table_phys = entry & arch::PHYS_ADDR_MASK;
         }
     }
 
-    // Level 3: this is the actual page table entry
+    // Level 3: final PTE
     let index = arch::table_index(vaddr, 3);
     let entry_ptr = ((table_phys + hhdm) as *mut u64).add(index);
     let entry = core::ptr::read_volatile(entry_ptr);
@@ -180,18 +331,13 @@ unsafe fn walk_page_table(vaddr: u64) -> Option<*mut u64> {
     Some(entry_ptr)
 }
 
-/// Change the memory permissions of a single page.
-///
-/// # Safety
-/// - The page at `vaddr` must be mapped in the current page table
-/// - No thread should be executing code in this page during RX→RW transition
+// ── Permission Modification ─────────────────────────────────────
+
+/// Change the memory permissions of a single 4KB page.
 pub unsafe fn set_page_permissions(vaddr: u64, perm: MemoryPermission) -> bool {
     let pte_ptr = match walk_page_table(vaddr) {
         Some(p) => p,
-        None => {
-            crate::kprintln!("  PTE: walk failed for {:#x}", vaddr);
-            return false;
-        }
+        None => return false,
     };
 
     let mut entry = core::ptr::read_volatile(pte_ptr);
@@ -200,20 +346,17 @@ pub unsafe fn set_page_permissions(vaddr: u64, perm: MemoryPermission) -> bool {
     {
         match perm {
             MemoryPermission::ReadWrite => {
-                // RW, no execute: AP=RW_EL1, PXN=1, UXN=1
                 entry &= !arch::PTE_AP_MASK;
                 entry |= arch::PTE_AP_RW_EL1;
-                entry |= arch::PTE_PXN | arch::PTE_UXN;
+                entry |= arch::PTE_PXN | arch::PTE_UXN; // No execute
             }
             MemoryPermission::ReadExecute => {
-                // RX, no write: AP=RO_EL1, PXN=0, UXN=1
                 entry &= !arch::PTE_AP_MASK;
                 entry |= arch::PTE_AP_RO_EL1;
                 entry &= !arch::PTE_PXN; // Allow privileged execute
-                entry |= arch::PTE_UXN;   // Still deny user execute
+                entry |= arch::PTE_UXN;  // Deny user execute
             }
         }
-        // Ensure Access Flag is set
         entry |= arch::PTE_AF;
     }
 
@@ -221,22 +364,17 @@ pub unsafe fn set_page_permissions(vaddr: u64, perm: MemoryPermission) -> bool {
     {
         match perm {
             MemoryPermission::ReadWrite => {
-                // RW, no execute: W=1, NX=1
                 entry |= arch::PTE_WRITABLE;
                 entry |= arch::PTE_NX;
             }
             MemoryPermission::ReadExecute => {
-                // RX, no write: W=0, NX=0
                 entry &= !arch::PTE_WRITABLE;
                 entry &= !arch::PTE_NX;
             }
         }
     }
 
-    // Write back the modified PTE
     core::ptr::write_volatile(pte_ptr, entry);
-
-    // Invalidate TLB for this page
     arch::tlbi_page(vaddr);
 
     true

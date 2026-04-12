@@ -18,6 +18,8 @@
 
 pub mod parser;
 pub mod compiler;
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64_emit;
 pub mod runtime;
 
 use alloc::vec::Vec;

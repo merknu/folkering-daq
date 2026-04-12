@@ -17,7 +17,7 @@ use crate::MemoryRegionKind;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 /// Heap size: 16 MiB (plenty for DAQ buffers + protocol state)
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 /// Initialize the heap allocator from memory map
 pub fn init(memory_map: &[MemoryRegion]) {

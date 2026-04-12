@@ -113,6 +113,14 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     memory::init(boot_info.memory_map);
     kprintln!("[OK] Heap allocator");
 
+    // Phase 4b: JIT memory pool (Silverfir-nano)
+    #[cfg(feature = "silverfir-jit")]
+    {
+        memory::jit::JitPool::init(boot_info.memory_map);
+        let (used, total) = memory::jit::JitPool::stats();
+        kprintln!("[OK] JIT pool ({}/{} pages, W^X ready)", used, total);
+    }
+
     // Phase 5+: Platform-specific hardware init
     #[cfg(feature = "pi5")]
     {

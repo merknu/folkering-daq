@@ -9,6 +9,7 @@
 pub mod socket;
 pub mod mdns;
 pub mod websocket;
+pub mod tcp_shell;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy;
@@ -107,8 +108,8 @@ static mut TCP_HANDLE: Option<SocketHandle> = None;
 static mut UDP_HANDLE: Option<SocketHandle> = None;
 
 // Socket set storage
-static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 4] =
-    [smoltcp::iface::SocketStorage::EMPTY; 4];
+static mut SOCKET_SET_BUF: [smoltcp::iface::SocketStorage<'static>; 5] =
+    [smoltcp::iface::SocketStorage::EMPTY; 5];
 static mut SOCKETS: Option<SocketSet<'static>> = None;
 
 // WebSocket handshake state
@@ -177,8 +178,11 @@ pub fn init() {
         WS_UPGRADED = false;
     }
 
+    // Initialize TCP remote shell on port 2222
+    unsafe { tcp_shell::init(SOCKETS.as_mut().unwrap()); }
+
     NET_READY.store(true, Ordering::SeqCst);
-    crate::kprintln!("  NET: stack ready, TCP :7420 + UDP :5353");
+    crate::kprintln!("  NET: stack ready, TCP :7420 + UDP :5353 + TCP :2222 shell");
 }
 
 /// Poll network — call from main loop
@@ -198,6 +202,9 @@ pub fn poll() {
 
         // Handle openDAQ TCP connections
         handle_opendaq_tcp(sockets);
+
+        // TCP remote shell
+        tcp_shell::poll(sockets);
     }
 }
 

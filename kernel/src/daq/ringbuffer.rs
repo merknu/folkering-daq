@@ -42,7 +42,10 @@ pub struct RingHeader {
 /// Producer and consumer share the RingHeader for coordination.
 pub struct SpscRingBuffer {
     header: &'static RingHeader,
-    data: &'static mut [f32],
+    /// Raw pointer to data array — we use raw pointers to avoid UB
+    /// when writing through &self (producer and consumer are different contexts)
+    data_ptr: *mut f32,
+    data_len: usize,
     mask: u32, // capacity - 1 (for branchless index wrapping)
 }
 
@@ -62,7 +65,6 @@ impl SpscRingBuffer {
 
         // Data starts after the header (2 cache lines = 128 bytes)
         let data_ptr = base.add(core::mem::size_of::<RingHeader>()) as *mut f32;
-        let data = core::slice::from_raw_parts_mut(data_ptr, capacity);
 
         // Zero-initialize the header
         header.head.store(0, Ordering::Relaxed);
@@ -70,7 +72,8 @@ impl SpscRingBuffer {
 
         SpscRingBuffer {
             header,
-            data,
+            data_ptr,
+            data_len: capacity,
             mask: (capacity - 1) as u32,
         }
     }
@@ -95,7 +98,7 @@ impl SpscRingBuffer {
             let idx = (head.wrapping_add(i as u32) & self.mask) as usize;
             // Safety: idx is always < capacity due to mask
             unsafe {
-                core::ptr::write_volatile(&self.data[idx] as *const f32 as *mut f32, samples[i]);
+                core::ptr::write_volatile(self.data_ptr.add(idx), samples[i]);
             }
         }
 
@@ -121,7 +124,7 @@ impl SpscRingBuffer {
 
         let idx = (head & self.mask) as usize;
         unsafe {
-            core::ptr::write_volatile(&self.data[idx] as *const f32 as *mut f32, sample);
+            core::ptr::write_volatile(self.data_ptr.add(idx), sample);
         }
 
         self.header.head.store(head.wrapping_add(1), Ordering::Release);
@@ -142,7 +145,7 @@ impl SpscRingBuffer {
         for i in 0..to_read {
             let idx = (tail.wrapping_add(i as u32) & self.mask) as usize;
             unsafe {
-                out[i] = core::ptr::read_volatile(&self.data[idx]);
+                out[i] = core::ptr::read_volatile(self.data_ptr.add(idx));
             }
         }
 
@@ -184,7 +187,7 @@ impl SpscRingBuffer {
 
     /// Get a raw pointer to the data region (for WASM memory mapping)
     pub fn data_ptr(&self) -> *const f32 {
-        self.data.as_ptr()
+        self.data_ptr as *const f32
     }
 
     /// Get a raw pointer to the header (for WASM memory mapping)

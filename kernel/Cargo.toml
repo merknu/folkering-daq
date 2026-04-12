@@ -43,6 +43,7 @@ default-features = false
 default = ["qemu-virt"]   # Default to QEMU for development
 pi5 = []                   # Raspberry Pi 5 (BCM2712 + RP1)
 qemu-virt = []             # QEMU aarch64 virt machine
+embedded-dsp = []          # Embed lowpass_filter.wasm in kernel image
 
 [profile.dev]
 panic = "abort"

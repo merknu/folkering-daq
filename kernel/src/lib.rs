@@ -145,16 +145,39 @@ pub fn kernel_main(boot_info: &BootInfo) -> ! {
     kprintln!("[OK] Silverfir-nano JIT runtime ready");
     kprintln!("     Host functions: {} registered", wasm::host_functions::HOST_FUNCTIONS.len());
 
-    // Load WASM apps from initrd / embedded modules (future: network hot-swap)
-    // For now, Silverfir is available but no apps are pre-loaded.
-    // Apps can be uploaded via network and JIT-compiled on-the-fly.
+    // Load embedded default DSP app (lowpass filter compiled into the kernel)
+    // This ensures the DAQ node starts processing immediately at boot.
+    // Can be replaced at runtime via network hot-swap on port 7421.
     static mut SILVERFIR_INSTANCE: Option<silverfir::runtime::SilverfirInstance> = None;
+
+    #[cfg(feature = "embedded-dsp")]
+    {
+        static EMBEDDED_WASM: &[u8] = include_bytes!("../../wasm-apps/lowpass_filter.wasm");
+        kprintln!("  Silverfir: loading embedded DSP app ({} bytes)...", EMBEDDED_WASM.len());
+
+        match silverfir::SilverfirModule::load(EMBEDDED_WASM) {
+            Ok(module) => {
+                let mut instance = silverfir::runtime::SilverfirInstance::new(module);
+                match instance.init() {
+                    Ok(()) => {
+                        kprintln!("  Silverfir: embedded lowpass filter loaded OK");
+                        unsafe { SILVERFIR_INSTANCE = Some(instance); }
+                    }
+                    Err(e) => kprintln!("  Silverfir: embedded init failed: {:?}", e),
+                }
+            }
+            Err(e) => kprintln!("  Silverfir: embedded load failed: {:?}", e),
+        }
+    }
+
+    #[cfg(not(feature = "embedded-dsp"))]
+    kprintln!("  Silverfir: no embedded app (upload via TCP :7421)");
 
     kprintln!("\n*** Folkering DAQ ready ***");
     kprintln!("  Timer freq: {} Hz", arch::aarch64::counter_freq());
     kprintln!("  Ring buffer: {} KiB ({} channels)",
         daq::ring_memory_size() / 1024, usb::sirius::NUM_CHANNELS + 1);
-    kprintln!("  Silverfir: awaiting WASM modules (hot-swap via network)");
+    kprintln!("  Hot-swap: TCP :7421 (python tools/deploy_wasm.py <app>)");
     kprintln!("");
 
     // Timer IRQs disabled for now — we use counter-based polling

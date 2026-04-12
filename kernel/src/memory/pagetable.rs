@@ -42,11 +42,11 @@ mod arch {
         val & PHYS_ADDR_MASK
     }
 
-    /// Read TTBR0_EL0 (user page table base for lower-half addresses)
+    /// Read TTBR0_EL1 (page table base for lower-half addresses)
     #[inline]
     pub fn read_ttbr0() -> u64 {
         let val: u64;
-        unsafe { core::arch::asm!("mrs {0}, TTBR0_EL0", out(reg) val, options(nomem, nostack)); }
+        unsafe { core::arch::asm!("mrs {0}, TTBR0_EL1", out(reg) val, options(nomem, nostack)); }
         val & PHYS_ADDR_MASK
     }
 

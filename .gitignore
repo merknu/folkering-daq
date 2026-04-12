@@ -1,1 +1,3 @@
 /target/
+apps/*/target/
+apps/*/Cargo.lock

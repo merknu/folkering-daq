@@ -123,64 +123,130 @@ extern "C" fn kmain_rust() -> ! {
     folkering_daq_kernel::kernel_main(&boot_info)
 }
 
-/// Entry point for Limine boot (Raspberry Pi 5).
+/// Bare-metal Raspberry Pi 5 boot stub.
+///
+/// Pi 5 firmware (start4.elf / Limine-less direct boot via `kernel=kernel8.img`)
+/// loads our raw binary to physical `0x80000` and jumps there. Compared to the
+/// QEMU/Limine paths we have to handle the rough edges ourselves:
+///
+///   * **MPIDR park.** All four cores start; only core 0 (Aff0=0) runs the
+///     kernel — secondaries spin in `wfe`.
+///   * **EL2 → EL1 drop.** Firmware leaves us at EL2 on Pi 4/5. EL1 is where
+///     our exception-vector / timer / GIC code expects to run.
+///   * **Stack.** Firmware doesn't set up `sp`; we point it at a dedicated
+///     64 KiB region in `.bss`.
+///   * **BSS zero.** Firmware doesn't promise zeroed BSS. The linker exports
+///     `__bss_start`/`__bss_end` and we clear it before any Rust runs.
+///   * **DTB pointer.** Firmware passes the device-tree-blob physical address
+///     in `x0`. We preserve it through the trampoline so `kmain_rust` can
+///     consume it.
+///
+/// Without this block, jumping straight from firmware to a Limine-format
+/// kernel image puts us at the (uninitialised) higher-half VA at boot and
+/// the silicon hangs in the first microsecond — which is the bug that
+/// kept the UART totally silent on hardware.
+#[cfg(feature = "pi5")]
+core::arch::global_asm!(r"
+.section .text.boot
+.global _start
+_start:
+    // Park secondary cores. MPIDR_EL1[1:0] = Aff0 (core id within cluster);
+    // anything non-zero is parked in wfe.
+    mrs     x1, mpidr_el1
+    and     x1, x1, #3
+    cbnz    x1, .Lpark_secondary
+
+    // Drop to EL1 if we landed at EL2 (Pi 5 firmware default).
+    mrs     x1, CurrentEL
+    lsr     x1, x1, #2
+    cmp     x1, #2
+    b.ne    .Lskip_el2_drop
+
+    // HCR_EL2.RW = 1 → EL1 is AArch64.
+    mov     x2, #(1 << 31)
+    msr     HCR_EL2, x2
+
+    // SCTLR_EL1 reset value (MMU off, caches off, exception endian = LE).
+    msr     SCTLR_EL1, xzr
+
+    // SPSR_EL2 = EL1h, DAIF masked (we'll unmask later when GIC is up).
+    mov     x2, #0x3c5
+    msr     SPSR_EL2, x2
+
+    adr     x2, .Lel1_entry
+    msr     ELR_EL2, x2
+    eret
+
+.Lel1_entry:
+.Lskip_el2_drop:
+    // Enable FP/SIMD at EL1 so Rust codegen doesn't trap on a fmov.
+    mov     x2, #(3 << 20)
+    msr     CPACR_EL1, x2
+    isb
+
+    // Stack pointer.
+    adrp    x2, __boot_stack_top
+    add     x2, x2, :lo12:__boot_stack_top
+    mov     sp, x2
+
+    // Zero the BSS (8 bytes at a time; alignment guaranteed by linker).
+    adrp    x2, __bss_start
+    add     x2, x2, :lo12:__bss_start
+    adrp    x3, __bss_end
+    add     x3, x3, :lo12:__bss_end
+.Lbss_zero:
+    cmp     x2, x3
+    b.ge    .Lbss_done
+    str     xzr, [x2], #8
+    b       .Lbss_zero
+.Lbss_done:
+
+    // x0 still holds the DTB pointer from firmware — pass it through.
+    bl      kmain_rust
+
+.Lhang:
+    wfe
+    b       .Lhang
+
+.Lpark_secondary:
+    wfe
+    b       .Lpark_secondary
+
+.section .bss
+.balign 16
+__boot_stack_bottom:
+    .space 65536
+__boot_stack_top:
+");
+
+/// Rust entry on Pi 5. Called from the asm stub above with valid `sp`,
+/// zeroed BSS, and the device-tree-blob physical pointer in x0.
+///
+/// We don't have a Limine memory map here — the DTB is the authoritative
+/// source for RAM regions, but parsing it requires alloc + a working heap
+/// (chicken-and-egg). For the first-boot bring-up we hard-code a single
+/// usable region covering the standard 4 GiB Pi 5 RAM minus the first
+/// MiB (firmware/GPU/kernel-image). DTB-driven memory discovery can come
+/// after we've proven serial output works.
 #[cfg(feature = "pi5")]
 #[no_mangle]
-extern "C" fn kmain() -> ! {
-    assert!(BASE_REVISION.is_supported());
+extern "C" fn kmain_rust(dtb_ptr: u64) -> ! {
+    // No higher-half mapping — physical == virtual at this point.
+    let hhdm_offset = 0u64;
+    let framebuffer = None;
 
-    let hhdm_offset = HHDM_REQUEST.get_response()
-        .expect("HHDM response missing")
-        .offset();
+    // Provisional Pi 5 memory map: skip the lowest 1 MiB (firmware / GPU /
+    // kernel image) and offer the rest as Usable. Refined later by parsing
+    // the DTB `/memory@0` node.
+    static mut MEMORY_REGIONS: [MemoryRegion; 1] = [MemoryRegion {
+        base: 0x100000,
+        length: 0xFFF0_0000, // ~4 GiB - 1 MiB
+        kind: MemoryRegionKind::Usable,
+    }];
+    let regions = unsafe { &MEMORY_REGIONS[..] };
 
-    // Extract framebuffer
-    let framebuffer = FRAMEBUFFER_REQUEST.get_response().and_then(|resp| {
-        resp.framebuffers().next().map(|fb| {
-            FramebufferInfo {
-                addr: fb.addr() as u64,
-                width: fb.width() as u32,
-                height: fb.height() as u32,
-                pitch: fb.pitch() as u32,
-                bpp: fb.bpp(),
-            }
-        })
-    });
+    let dtb_addr = if dtb_ptr != 0 { Some(dtb_ptr) } else { None };
 
-    // Extract memory map
-    let memory_map = MEMORY_MAP_REQUEST.get_response()
-        .expect("Memory map response missing");
-
-    // Convert Limine memory map to our format
-    // Safety: we store in a static buffer that lives forever
-    static mut MEMORY_REGIONS: [MemoryRegion; 128] = [MemoryRegion {
-        base: 0, length: 0, kind: MemoryRegionKind::Reserved,
-    }; 128];
-
-    let entries = memory_map.entries();
-    let count = entries.len().min(128);
-
-    let regions = unsafe {
-        for (i, entry) in entries.iter().take(count).enumerate() {
-            MEMORY_REGIONS[i] = MemoryRegion {
-                base: entry.base,
-                length: entry.length,
-                kind: match entry.entry_type {
-                    limine::memory_map::EntryType::USABLE => MemoryRegionKind::Usable,
-                    limine::memory_map::EntryType::ACPI_RECLAIMABLE => MemoryRegionKind::AcpiReclaimable,
-                    limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => MemoryRegionKind::BootloaderReclaimable,
-                    limine::memory_map::EntryType::KERNEL_AND_MODULES => MemoryRegionKind::KernelAndModules,
-                    limine::memory_map::EntryType::FRAMEBUFFER => MemoryRegionKind::Framebuffer,
-                    _ => MemoryRegionKind::Reserved,
-                },
-            };
-        }
-        &MEMORY_REGIONS[..count]
-    };
-
-    // Extract DTB address (Pi firmware provides device tree)
-    let dtb_addr = DTB_REQUEST.get_response().map(|resp| resp.dtb_ptr() as u64);
-
-    // Build boot info and hand off to kernel
     let boot_info = BootInfo {
         hhdm_offset,
         framebuffer,

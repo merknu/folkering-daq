@@ -146,10 +146,46 @@ extern "C" fn kmain_rust() -> ! {
 /// the silicon hangs in the first microsecond — which is the bug that
 /// kept the UART totally silent on hardware.
 #[cfg(feature = "pi5")]
-core::arch::global_asm!(r"
+core::arch::global_asm!(r#"
 .section .text.boot
 .global _start
 _start:
+    // EARLY-BOOT UART PROOF-OF-LIFE.
+    //
+    // Pi firmware enables and configures PL011 UART0 itself when
+    // `enable_uart=1` + `uart_2ndstage=1` are set in config.txt, so by the
+    // time we land here the controller is already pumping at 115200 8N1.
+    // Banging a literal byte directly into the data register before *any*
+    // other init proves three things at once:
+    //   1. Pi-firmware actually loaded and jumped to our kernel8.img (not
+    //      stuck booting from NVMe / silently failing parse).
+    //   2. The dedicated 3-pin debug header is wired to UART0 (the address
+    //      we're using) — not some other UART on the SoC.
+    //   3. The USB-serial cable + CH340 + PowerShell pipeline at the
+    //      other end is end-to-end functional.
+    //
+    // If the host sees ":-)" come over UART here, every later init phase
+    // that goes silent is a real kernel bug we can debug. If the host
+    // still sees nothing, the kernel isn't running at all — boot order,
+    // SD priority, or wiring needs to be checked.
+    //
+    // The byte sequence ":-)\r\n" is six characters, sent without polling
+    // FR_TXFF — firmware-set FIFO depth is 16 bytes so a six-byte burst
+    // is always safe.
+    movz    x4, #0x1000
+    movk    x4, #0x7D00, lsl #16
+    movk    x4, #0x0010, lsl #32   // x4 = 0x0000_0010_7D00_1000 (UART0 DR)
+    mov     w5, #58                 // ':'
+    str     w5, [x4]
+    mov     w5, #45                 // '-'
+    str     w5, [x4]
+    mov     w5, #41                 // ')'
+    str     w5, [x4]
+    mov     w5, #13                 // '\r'
+    str     w5, [x4]
+    mov     w5, #10                 // '\n'
+    str     w5, [x4]
+
     // Park secondary cores. MPIDR_EL1[1:0] = Aff0 (core id within cluster);
     // anything non-zero is parked in wfe.
     mrs     x1, mpidr_el1
@@ -217,7 +253,7 @@ _start:
 __boot_stack_bottom:
     .space 65536
 __boot_stack_top:
-");
+"#);
 
 /// Rust entry on Pi 5. Called from the asm stub above with valid `sp`,
 /// zeroed BSS, and the device-tree-blob physical pointer in x0.
